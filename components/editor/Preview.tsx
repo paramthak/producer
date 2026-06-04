@@ -71,7 +71,7 @@ export function Preview({ segments, clips, voiceoverUrl, totalDurationMs, seekRe
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="relative mx-auto aspect-[9/16] w-full max-w-[22rem] overflow-hidden rounded-2xl border border-border bg-black shadow-[0_24px_60px_-12px_rgb(0_0_0_/_0.6)]">
+      <div className="relative mx-auto aspect-[9/16] w-full max-w-[18rem] max-h-[calc(100vh-19rem)] overflow-hidden rounded-2xl border border-border bg-black shadow-[0_24px_60px_-12px_rgb(0_0_0_/_0.6)]">
         {segments.length === 0 && (
           <div className="absolute inset-0 grid place-items-center text-xs text-muted-foreground">
             No segments yet

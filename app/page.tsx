@@ -6,6 +6,7 @@ import {
   Download,
   FileVideo,
   Loader2,
+  Plus,
   RotateCw,
   Sparkles,
   Square,
@@ -15,7 +16,7 @@ import { toast } from "sonner";
 import { Logo } from "@/components/branding/Logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { SectionBucket } from "@/components/builder/SectionBucket";
 import { ScriptPane } from "@/components/builder/ScriptPane";
 import { VoiceoverSlot } from "@/components/builder/VoiceoverSlot";
@@ -24,7 +25,7 @@ import { PhaseStrip } from "@/components/processing/PhaseStrip";
 import { ElapsedTimer } from "@/components/processing/ElapsedTimer";
 import { Preview } from "@/components/editor/Preview";
 import { Timeline } from "@/components/editor/Timeline";
-import { useSessionManifest } from "@/lib/builderStore";
+import { resetSession, useSessionManifest } from "@/lib/builderStore";
 import {
   PHASE_LABEL,
   SECTIONS,
@@ -64,6 +65,8 @@ export default function StudioPage() {
   const [exporting, setExporting] = useState<"none" | "mp4" | "fcpxml">("none");
   const [seekReq, setSeekReq] = useState<{ ms: number; nonce: number } | null>(null);
   const [currentMs, setCurrentMs] = useState(0);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const seekNonceRef = useRef(0);
 
   // If a session already has a saved edit plan on disk, jump straight into edit mode.
@@ -247,6 +250,15 @@ export default function StudioPage() {
         <div className="container flex h-16 items-center justify-between gap-4">
           <Logo />
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setResetOpen(true)}
+              className="gap-1.5"
+              title="Start a new session"
+            >
+              <Plus className="size-3.5" /> New session
+            </Button>
             {mode === "edit" && editor && (
               <>
                 <Button variant="outline" onClick={() => exportFile("fcpxml")} disabled={exporting !== "none"}>
@@ -274,7 +286,7 @@ export default function StudioPage() {
         </div>
       </header>
 
-      <main className="container py-8">
+      <main className={`container ${mode === "edit" ? "pt-3 pb-4" : "py-8"}`}>
         {mode === "setup" ? (
           <SetupView
             sessionId={sessionId}
@@ -317,6 +329,15 @@ export default function StudioPage() {
         onStop={stopJob}
         onTryAgain={tryAgain}
         onDismiss={() => setActiveJob(null)}
+      />
+      <ResetConfirm
+        open={resetOpen}
+        busy={resetting}
+        onCancel={() => setResetOpen(false)}
+        onConfirm={async () => {
+          setResetting(true);
+          await resetSession(sessionId);
+        }}
       />
       <RouterMirror router={router} mode={mode} />
     </div>
@@ -496,15 +517,15 @@ function EditView({
 }: EditViewProps) {
   const totalMs = plan.totalDurationMs || editor.alignment.durationMs;
   return (
-    <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[22rem_1fr_22rem]">
-        <aside className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[22rem_1fr_22rem]">
+        <aside className="flex flex-col gap-3">
           <Card>
-            <CardHeader>
-              <CardTitle>Steering</CardTitle>
-              <CardDescription>Tweak and Re-run — cached frames & alignment make it fast.</CardDescription>
+            <CardHeader className="p-4">
+              <CardTitle className="text-base">Steering</CardTitle>
+              <CardDescription className="text-xs">Tweak and Re-run — cached frames & alignment make it fast.</CardDescription>
             </CardHeader>
-            <CardContent className="flex flex-col gap-3">
+            <CardContent className="flex flex-col gap-2.5 p-4 pt-0">
               <OverridePrompt value={overridePrompt} onChange={setOverridePrompt} variant="editor" />
               <Button variant="primary" onClick={onRerun} className="w-full">
                 <RotateCw className="size-4" />
@@ -517,10 +538,10 @@ function EditView({
           </Card>
 
           <Card>
-            <CardHeader>
-              <CardTitle>Reel stats</CardTitle>
+            <CardHeader className="p-4 pb-2">
+              <CardTitle className="text-base">Reel stats</CardTitle>
             </CardHeader>
-            <CardContent className="grid grid-cols-3 gap-3 text-center">
+            <CardContent className="grid grid-cols-3 gap-2 p-4 pt-0 text-center">
               <Stat label="Segments" value={plan.segments.length.toString()} />
               <Stat label="Duration" value={formatDuration(totalMs)} />
               <Stat label="Clips" value={editor.manifest.clips.length.toString()} />
@@ -528,9 +549,9 @@ function EditView({
           </Card>
         </aside>
 
-        <section className="flex flex-col items-center justify-start gap-3">
+        <section className="flex flex-col items-center justify-start">
           <Card className="w-full">
-            <CardContent className="p-4">
+            <CardContent className="p-3">
               <Preview
                 segments={plan.segments}
                 clips={clipsMap}
@@ -543,12 +564,12 @@ function EditView({
           </Card>
         </section>
 
-        <aside className="flex flex-col gap-4">
+        <aside className="flex flex-col gap-3">
           <Card>
-            <CardHeader>
-              <CardTitle>Tips</CardTitle>
+            <CardHeader className="p-4 pb-2">
+              <CardTitle className="text-base">Tips</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-2 text-xs text-muted-foreground leading-relaxed">
+            <CardContent className="space-y-1.5 p-4 pt-0 text-xs text-muted-foreground leading-relaxed">
               <p>· Click the timeline ruler to scrub.</p>
               <p>· Hover a clip card to see why this clip was picked.</p>
               <p>· Drag the edges to re-trim. Drag the body to reorder within a section.</p>
@@ -558,9 +579,9 @@ function EditView({
         </aside>
       </div>
 
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between px-1">
-          <h2 className="font-display text-lg font-semibold tracking-tight">Timeline</h2>
+          <h2 className="font-display text-base font-semibold tracking-tight">Timeline</h2>
           <span className="font-mono text-xs tabular-nums text-muted-foreground">
             {formatDuration(currentMs)} / {formatDuration(totalMs)}
           </span>
@@ -615,13 +636,13 @@ function CookOverlay({
           <div className="p-6">
             <div className="mb-5 flex items-start justify-between gap-4">
               <div>
-                <h2 className="font-display text-2xl font-semibold leading-tight">
+                <DialogTitle className="font-display text-2xl font-semibold leading-tight">
                   {isDone ? "Cut's ready — opening editor…" :
                    isTerminal && job?.status === "failed" ? "Hit a snag" :
                    isTerminal ? "Stopped" :
                    "Cooking your reel"}
-                </h2>
-                <p className="mt-1 text-sm text-muted-foreground">
+                </DialogTitle>
+                <DialogDescription className="mt-1 text-sm text-muted-foreground">
                   {job?.status === "running"
                     ? `${PHASE_LABEL[job.currentPhase]} — typically 1–3 min total.`
                     : job?.status === "failed"
@@ -629,7 +650,7 @@ function CookOverlay({
                       : job?.status === "stopped"
                         ? "Whatever was analysed has been kept."
                         : "Loading…"}
-                </p>
+                </DialogDescription>
               </div>
               {job && <ElapsedTimer startedAt={job.startedAt} finishedAt={job.finishedAt} />}
             </div>
@@ -652,6 +673,46 @@ function CookOverlay({
                   </Button>
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ============================== RESET CONFIRM ============================== */
+
+function ResetConfirm({
+  open,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) onCancel(); }}>
+      <DialogContent className="!max-w-md overflow-hidden border-destructive/40">
+        <div className="relative">
+          <div className="absolute inset-x-0 top-0 h-1 bg-hot" aria-hidden="true" />
+          <div className="pt-2">
+            <DialogTitle className="font-display text-xl font-semibold leading-tight">
+              Start a new session?
+            </DialogTitle>
+            <DialogDescription className="mt-2 text-sm text-muted-foreground leading-relaxed">
+              All uploaded clips, the voiceover, the script, and the assembled cut will be deleted from
+              the server. This can&apos;t be undone.
+            </DialogDescription>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <Button variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
+              <Button variant="destructive" onClick={onConfirm} disabled={busy}>
+                {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                Yes, new session
+              </Button>
             </div>
           </div>
         </div>

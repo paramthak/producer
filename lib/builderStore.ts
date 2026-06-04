@@ -127,3 +127,14 @@ export async function deleteClip(sessionId: string, clipId: string): Promise<voi
   });
   if (!res.ok) throw new Error(`Delete failed (${res.status})`);
 }
+
+/** Nuke the current session on the server, clear local pointer, hard reload. */
+export async function resetSession(currentSessionId: string | null): Promise<void> {
+  if (currentSessionId) {
+    await fetch(`/api/session?sessionId=${currentSessionId}`, { method: "DELETE" }).catch(() => {});
+  }
+  clearSessionId();
+  if (typeof window !== "undefined") {
+    window.location.assign("/");
+  }
+}
