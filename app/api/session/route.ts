@@ -1,12 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "node:fs";
-import { ensureSession, sessionDir } from "@/lib/session";
+import path from "node:path";
+import { DATA_ROOT, ensureSession, sessionDir } from "@/lib/session";
 import { saveManifest, loadManifest } from "@/lib/manifest";
 
 export const runtime = "nodejs";
 
 export async function POST() {
   const sessionId = await ensureSession();
+
+  // Single-user product: any session folder that isn't the one we just created
+  // is an orphan from a closed tab or crashed run. Nuke them so the disk stays
+  // bounded to a single live session at any time.
+  try {
+    const entries = await fs.readdir(DATA_ROOT, { withFileTypes: true });
+    await Promise.all(
+      entries
+        .filter((e) => e.isDirectory() && e.name !== sessionId)
+        .map((e) => fs.rm(path.join(DATA_ROOT, e.name), { recursive: true, force: true })),
+    );
+  } catch {
+    /* DATA_ROOT may not exist yet on a fresh deploy — ensureSession will create it. */
+  }
+
   const existing = await loadManifest(sessionId);
   if (!existing) {
     await saveManifest({

@@ -2,7 +2,9 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
 
-export const DATA_ROOT = path.resolve(process.cwd(), ".producer-data");
+export const DATA_ROOT = process.env.DATA_ROOT
+  ? path.resolve(process.env.DATA_ROOT)
+  : path.resolve(process.cwd(), ".producer-data");
 
 export function sessionDir(sessionId: string): string {
   // Defensive: reject traversal.
