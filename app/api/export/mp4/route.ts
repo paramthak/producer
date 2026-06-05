@@ -2,10 +2,10 @@ import { NextRequest } from "next/server";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { Readable } from "node:stream";
 import { paths, readJson } from "@/lib/session";
 import { loadManifest } from "@/lib/manifest";
 import { renderFinalMp4, type RenderSegment } from "@/lib/ffmpeg";
+import { nodeStreamToWebStream } from "@/lib/streamHelpers";
 import type { EditPlan } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
 
   const stats = await stat(outPath);
   const stream = createReadStream(outPath);
-  return new Response(Readable.toWeb(stream) as ReadableStream, {
+  return new Response(nodeStreamToWebStream(stream, req.signal), {
     headers: {
       "content-type": "video/mp4",
       "content-length": String(stats.size),

@@ -2,8 +2,8 @@ import { NextRequest } from "next/server";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { Readable } from "node:stream";
 import { DATA_ROOT, sessionDir } from "@/lib/session";
+import { nodeStreamToWebStream } from "@/lib/streamHelpers";
 
 export const runtime = "nodejs";
 
@@ -57,7 +57,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path: strin
     const end = endStr ? Number(endStr) : stats.size - 1;
     const chunkSize = end - start + 1;
     const stream = createReadStream(abs, { start, end });
-    return new Response(Readable.toWeb(stream) as ReadableStream, {
+    return new Response(nodeStreamToWebStream(stream, req.signal), {
       status: 206,
       headers: {
         "Content-Range": `bytes ${start}-${end}/${stats.size}`,
@@ -70,7 +70,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path: strin
   }
 
   const stream = createReadStream(abs);
-  return new Response(Readable.toWeb(stream) as ReadableStream, {
+  return new Response(nodeStreamToWebStream(stream, req.signal), {
     headers: {
       "Content-Type": type,
       "Content-Length": String(stats.size),
