@@ -15,41 +15,60 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   }
 
   // SSE stream.
+  //
+  // Be defensive: the subscriber callback can fire microseconds after the
+  // client disconnects, by which time controller.enqueue() throws
+  // ERR_INVALID_STATE on a closed controller. That throw is uncatchable from
+  // the EventEmitter call site and surfaces as an uncaughtException, which
+  // can crash-loop the container. Track a `closed` flag, wrap every enqueue
+  // in try/catch, and ensure unsubscribe runs exactly once.
   const stream = new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
-      const send = (data: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-      };
-      const initial = jobStore.get(id);
-      if (!initial) {
-        send({ error: "Unknown job" });
-        controller.close();
-        return;
-      }
-      send(initial);
-      const unsub = jobStore.subscribe(id, (job) => {
-        send(job);
-        if (job.status === "complete" || job.status === "failed" || job.status === "stopped") {
-          // Give the client a tick to read final state.
-          setTimeout(() => {
-            try {
-              controller.close();
-            } catch {
-              /* ignore */
-            }
-            unsub();
-          }, 80);
-        }
-      });
-      req.signal.addEventListener("abort", () => {
+      let closed = false;
+      let unsub: (() => void) | null = null;
+
+      const teardown = () => {
+        if (closed) return;
+        closed = true;
         try {
           controller.close();
         } catch {
-          /* ignore */
+          /* already closed */
         }
-        unsub();
+        if (unsub) {
+          unsub();
+          unsub = null;
+        }
+      };
+
+      const send = (data: unknown) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          // Client went away mid-emit — tear down cleanly instead of throwing.
+          teardown();
+        }
+      };
+
+      const initial = jobStore.get(id);
+      if (!initial) {
+        send({ error: "Unknown job" });
+        teardown();
+        return;
+      }
+      send(initial);
+
+      unsub = jobStore.subscribe(id, (job) => {
+        send(job);
+        if (job.status === "complete" || job.status === "failed" || job.status === "stopped") {
+          // Give the client a tick to read final state before closing.
+          setTimeout(teardown, 80);
+        }
       });
+
+      req.signal.addEventListener("abort", teardown);
     },
   });
 
