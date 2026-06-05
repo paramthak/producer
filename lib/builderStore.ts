@@ -85,17 +85,24 @@ export function useSessionManifest() {
   return { sessionId, manifest, setManifest, loading, refresh, patch };
 }
 
+// Stream the raw file body to the server with metadata in query params.
+// Sidesteps Next.js's req.formData() parser which fails on files >~10 MiB.
 export async function uploadClip(
   sessionId: string,
   section: SectionId,
   file: File,
 ): Promise<SourceClip> {
-  const form = new FormData();
-  form.set("sessionId", sessionId);
-  form.set("section", section);
-  form.set("kind", "clip");
-  form.set("file", file);
-  const res = await fetch("/api/upload", { method: "POST", body: form });
+  const params = new URLSearchParams({
+    sessionId,
+    section,
+    kind: "clip",
+    filename: file.name,
+  });
+  const res = await fetch(`/api/upload?${params.toString()}`, {
+    method: "POST",
+    headers: { "content-type": file.type || "application/octet-stream" },
+    body: file,
+  });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error || `Upload failed (${res.status})`);
@@ -105,11 +112,16 @@ export async function uploadClip(
 }
 
 export async function uploadVoiceover(sessionId: string, file: File) {
-  const form = new FormData();
-  form.set("sessionId", sessionId);
-  form.set("kind", "voiceover");
-  form.set("file", file);
-  const res = await fetch("/api/upload", { method: "POST", body: form });
+  const params = new URLSearchParams({
+    sessionId,
+    kind: "voiceover",
+    filename: file.name,
+  });
+  const res = await fetch(`/api/upload?${params.toString()}`, {
+    method: "POST",
+    headers: { "content-type": file.type || "application/octet-stream" },
+    body: file,
+  });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error || `Upload failed (${res.status})`);

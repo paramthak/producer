@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "node:fs";
+import { promises as fs, createWriteStream } from "node:fs";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { nanoid } from "nanoid";
 import { ensureSession, paths, mediaUrl } from "@/lib/session";
 import { loadManifest, saveManifest } from "@/lib/manifest";
 import { probe, probeAudioDurationMs } from "@/lib/ffmpeg";
+import { AUTH_COOKIE, AUTH_COOKIE_VALUE } from "@/lib/auth";
 import {
   AUDIO_EXTS,
   IMAGE_EXTS,
@@ -26,18 +29,39 @@ function safeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
 }
 
+/**
+ * Streaming upload endpoint.
+ *
+ * Why not req.formData()?  Next.js's built-in FormData parser fails on files
+ * above ~10 MiB with "expected boundary after body" — it buffers the whole
+ * body and the multipart parser desyncs on large bodies. We stream the raw
+ * request body straight to disk instead. Metadata travels in query params so
+ * there's no multipart parsing at all.
+ *
+ * middleware.ts excludes /api/upload from its matcher (so the Edge runtime's
+ * 10 MiB body cap doesn't apply), which means we must do the auth check
+ * inline here.
+ */
 export async function POST(req: NextRequest) {
-  const form = await req.formData();
-  const sessionId = await ensureSession((form.get("sessionId") as string) || undefined);
-  const kind = (form.get("kind") as string) ?? "clip";
-  const section = (form.get("section") as string | null) as SectionId | null;
-  const file = form.get("file") as File | null;
-
-  if (!file) {
-    return NextResponse.json({ error: "Missing file" }, { status: 400 });
+  if (req.cookies.get(AUTH_COOKIE)?.value !== AUTH_COOKIE_VALUE) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const ext = extOf(file.name);
+  const sp = req.nextUrl.searchParams;
+  const sessionIdParam = sp.get("sessionId") || undefined;
+  const kind = (sp.get("kind") as string) ?? "clip";
+  const section = sp.get("section") as SectionId | null;
+  const filename = sp.get("filename");
+
+  if (!filename) {
+    return NextResponse.json({ error: "Missing filename" }, { status: 400 });
+  }
+  if (!req.body) {
+    return NextResponse.json({ error: "Missing body" }, { status: 400 });
+  }
+
+  const sessionId = await ensureSession(sessionIdParam);
+  const ext = extOf(filename);
   const manifest = (await loadManifest(sessionId)) ?? {
     sessionId,
     createdAt: Date.now(),
@@ -47,8 +71,6 @@ export async function POST(req: NextRequest) {
     overridePrompt: "",
   };
 
-  const bytes = Buffer.from(await file.arrayBuffer());
-
   if (kind === "voiceover") {
     if (!(AUDIO_EXTS as readonly string[]).includes(ext)) {
       return NextResponse.json(
@@ -56,22 +78,23 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
-    const filename = `voiceover${ext}`;
-    const rel = path.join("voiceover", filename);
+    const storedName = `voiceover${ext}`;
+    const rel = path.join("voiceover", storedName);
     const abs = path.join(paths(sessionId).base, rel);
     await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, bytes);
+    await streamToFile(req.body, abs);
     let durationMs = 0;
     try {
       durationMs = await probeAudioDurationMs(abs);
     } catch {
       /* probe is best-effort */
     }
+    const stats = await fs.stat(abs);
     manifest.voiceover = {
-      filename: file.name,
+      filename,
       relPath: rel,
       url: mediaUrl(sessionId, rel),
-      sizeBytes: bytes.length,
+      sizeBytes: stats.size,
     };
     await saveManifest(manifest);
     return NextResponse.json({
@@ -81,11 +104,10 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Clip upload
+  // Clip
   if (!section || !SECTIONS.includes(section)) {
     return NextResponse.json({ error: "Missing or invalid section" }, { status: 400 });
   }
-
   let clipKind: ClipKind | null = null;
   if ((VIDEO_EXTS as readonly string[]).includes(ext)) clipKind = "video";
   else if ((IMAGE_EXTS as readonly string[]).includes(ext)) clipKind = "image";
@@ -97,12 +119,13 @@ export async function POST(req: NextRequest) {
   }
 
   const id = nanoid(10);
-  const stored = `${id}_${safeName(file.name)}`;
+  const stored = `${id}_${safeName(filename)}`;
   const rel = path.join("sources", stored);
   const abs = path.join(paths(sessionId).base, rel);
   await fs.mkdir(path.dirname(abs), { recursive: true });
-  await fs.writeFile(abs, bytes);
+  await streamToFile(req.body, abs);
 
+  const stats = await fs.stat(abs);
   let durationMs = 0;
   let width: number | undefined;
   let height: number | undefined;
@@ -123,17 +146,24 @@ export async function POST(req: NextRequest) {
     id,
     section,
     kind: clipKind,
-    filename: file.name,
+    filename,
     relPath: rel,
     url: mediaUrl(sessionId, rel),
     durationMs,
     width,
     height,
     fps,
-    sizeBytes: bytes.length,
+    sizeBytes: stats.size,
   };
   manifest.clips.push(clip);
   await saveManifest(manifest);
 
   return NextResponse.json({ sessionId, clip });
+}
+
+async function streamToFile(body: ReadableStream<Uint8Array>, abs: string): Promise<void> {
+  // Web ReadableStream → Node Readable → pipe to disk.
+  // Streams chunk-by-chunk; never holds the full file in memory.
+  const nodeStream = Readable.fromWeb(body as unknown as import("stream/web").ReadableStream);
+  await pipeline(nodeStream, createWriteStream(abs));
 }

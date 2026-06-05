@@ -30,6 +30,14 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  // Run on everything except static assets + favicon.
-  matcher: ["/((?!_next/|favicon|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|woff|woff2|ttf|otf)$).*)"],
+  // Run on everything except:
+  //  - _next/ and static assets (don't need auth)
+  //  - /api/upload — the Edge runtime that middleware runs in buffers the entire
+  //    request body and caps it at 10 MiB. Even when middleware returns
+  //    NextResponse.next() without reading the body, Edge still applies that cap.
+  //    Excluding the path entirely routes large uploads straight to the Node
+  //    runtime handler. Auth is done inline in app/api/upload/route.ts.
+  matcher: [
+    "/((?!_next/|favicon|api/upload|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|woff|woff2|ttf|otf)$).*)",
+  ],
 };
