@@ -62,7 +62,7 @@ export default function StudioPage() {
   const [editor, setEditor] = useState<EditorData | null>(null);
   const [plan, setPlan] = useState<EditPlan | null>(null);
   const [overridePrompt, setOverridePrompt] = useState("");
-  const [exporting, setExporting] = useState<"none" | "mp4" | "fcpxml">("none");
+  const [exporting, setExporting] = useState<"none" | "mp4" | "xml">("none");
   const [seekReq, setSeekReq] = useState<{ ms: number; nonce: number } | null>(null);
   const [currentMs, setCurrentMs] = useState(0);
   const [resetOpen, setResetOpen] = useState(false);
@@ -208,7 +208,7 @@ export default function StudioPage() {
     setSeekReq({ ms, nonce: seekNonceRef.current });
   };
 
-  const exportFile = async (kind: "mp4" | "fcpxml") => {
+  const exportFile = async (kind: "mp4" | "xml") => {
     if (!sessionId) return;
     setExporting(kind);
     try {
@@ -225,12 +225,12 @@ export default function StudioPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `producer-${sessionId.slice(0, 6)}.${kind === "mp4" ? "mp4" : "fcpxml"}`;
+      a.download = `producer-${sessionId.slice(0, 6)}.${kind}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      toast.success(kind === "mp4" ? "Downloaded MP4" : "Downloaded Premiere FCPXML");
+      toast.success(kind === "mp4" ? "Downloaded MP4" : "Downloaded XML — open in Premiere / Resolve / FCP");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Export failed");
     } finally {
@@ -261,9 +261,9 @@ export default function StudioPage() {
             </Button>
             {mode === "edit" && editor && (
               <>
-                <Button variant="outline" onClick={() => exportFile("fcpxml")} disabled={exporting !== "none"}>
-                  {exporting === "fcpxml" ? <Loader2 className="size-4 animate-spin" /> : <FileVideo className="size-4" />}
-                  Premiere
+                <Button variant="outline" onClick={() => exportFile("xml")} disabled={exporting !== "none"}>
+                  {exporting === "xml" ? <Loader2 className="size-4 animate-spin" /> : <FileVideo className="size-4" />}
+                  Open in editor (XML)
                 </Button>
                 <Button onClick={() => exportFile("mp4")} disabled={exporting !== "none"} size="lg">
                   {exporting === "mp4" ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}

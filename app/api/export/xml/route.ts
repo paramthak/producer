@@ -2,14 +2,31 @@ import { NextRequest, NextResponse } from "next/server";
 import path from "node:path";
 import { paths, readJson } from "@/lib/session";
 import { loadManifest } from "@/lib/manifest";
-import { buildFcpxml } from "@/lib/fcpxml";
+import { buildXmeml } from "@/lib/xmeml";
 import type { EditPlan, WordTimestamp } from "@/lib/types";
 
 export const runtime = "nodejs";
 
+/**
+ * Export the edit as FCP7 XML (XMEML version 5).
+ *
+ * Why this format?
+ *   Universal NLE interchange — Premiere Pro, DaVinci Resolve, Avid,
+ *   Final Cut Pro, Smoke/Flame all import .xml natively with full
+ *   fidelity (clip references, source in/out per instance, timeline
+ *   positions, audio). Far more reliable than FCPXML in non-FCP tools.
+ *
+ * Why <pathurl> is absolute local?
+ *   This tool runs locally (localhost only). The XML embeds absolute
+ *   paths into .producer-data/ on this Mac, so when the user opens the
+ *   .xml in Premiere, the source clips are already linked. No relink
+ *   dialog, no "media offline" prompts.
+ */
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as { sessionId: string };
-  if (!body.sessionId) return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
+  if (!body.sessionId) {
+    return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
+  }
 
   const m = await loadManifest(body.sessionId);
   const p = paths(body.sessionId);
@@ -22,7 +39,7 @@ export async function POST(req: NextRequest) {
   const clipsById = Object.fromEntries(m.clips.map((c) => [c.id, c]));
   const clipAbs = Object.fromEntries(m.clips.map((c) => [c.id, path.join(p.base, c.relPath)]));
 
-  const xml = buildFcpxml({
+  const xml = buildXmeml({
     projectName: `Producer-${body.sessionId.slice(0, 6)}`,
     plan,
     clips: clipsById,
@@ -35,7 +52,7 @@ export async function POST(req: NextRequest) {
   return new Response(xml, {
     headers: {
       "content-type": "application/xml",
-      "content-disposition": `attachment; filename="producer-${body.sessionId.slice(0, 6)}.fcpxml"`,
+      "content-disposition": `attachment; filename="producer-${body.sessionId.slice(0, 6)}.xml"`,
       "cache-control": "no-store",
     },
   });
