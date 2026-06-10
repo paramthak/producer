@@ -54,16 +54,100 @@ interface Props {
 
 const PX_PER_SEC = 36;
 const TRACK_HEIGHT = 88;
+const MIN_SEG_MS = 80;
 
-function recompute(plan: EditPlan): EditPlan {
-  let cursor = 0;
-  const segments = plan.segments.map((s) => {
-    const dur = Math.max(80, s.sourceOutMs - s.sourceInMs);
-    const next = { ...s, timelineStartMs: cursor, timelineEndMs: cursor + dur };
+/**
+ * Ripple-shift one segment's duration change: keep its timelineStartMs,
+ * recompute its timelineEndMs from the new source range, and shift all
+ * later segments by the delta. Other segments — and any gaps before this
+ * one — keep their original positions. This is the standard NLE ripple
+ * edit, replacing the old `recompute()` that snapped everything to t=0.
+ */
+function applySegmentPatch(plan: EditPlan, segId: string, patch: Partial<PlanSegment>): EditPlan {
+  const idx = plan.segments.findIndex((s) => s.id === segId);
+  if (idx < 0) return plan;
+
+  // Treat segments in timeline order for the ripple math, but keep the
+  // returned segments in their original array order so React keys stay stable.
+  const inTimelineOrder = [...plan.segments].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  const orderIdx = inTimelineOrder.findIndex((s) => s.id === segId);
+  const orig = inTimelineOrder[orderIdx];
+
+  const merged = { ...orig, ...patch };
+  const newDur = Math.max(MIN_SEG_MS, merged.sourceOutMs - merged.sourceInMs);
+  const newEnd = merged.timelineStartMs + newDur;
+  const oldDur = orig.timelineEndMs - orig.timelineStartMs;
+  const delta = newDur - oldDur;
+  merged.timelineEndMs = newEnd;
+
+  const shiftedById = new Map<string, PlanSegment>();
+  shiftedById.set(merged.id, merged);
+  for (let i = orderIdx + 1; i < inTimelineOrder.length; i++) {
+    const s = inTimelineOrder[i];
+    shiftedById.set(s.id, {
+      ...s,
+      timelineStartMs: s.timelineStartMs + delta,
+      timelineEndMs: s.timelineEndMs + delta,
+    });
+  }
+
+  const next = plan.segments.map((s) => shiftedById.get(s.id) ?? s);
+  const totalDurationMs = Math.max(
+    plan.totalDurationMs,
+    ...next.map((s) => s.timelineEndMs),
+  );
+  return { segments: next, totalDurationMs };
+}
+
+/**
+ * Ripple-reorder within a section: lay the new section order back-to-back
+ * starting at the section's original startMs (so gaps before/after the
+ * section are preserved), then shift everything after the section by the
+ * delta in section length.
+ */
+function applySectionReorder(
+  plan: EditPlan,
+  section: SectionId,
+  newSectionSegments: PlanSegment[],
+): EditPlan {
+  const inOrder = [...plan.segments].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  const oldSectionSegs = inOrder.filter((s) => s.section === section);
+  if (oldSectionSegs.length === 0) return plan;
+
+  const sectionStart = oldSectionSegs[0].timelineStartMs;
+  const oldSectionEnd = oldSectionSegs[oldSectionSegs.length - 1].timelineEndMs;
+
+  let cursor = sectionStart;
+  const repositionedSection = newSectionSegments.map((s) => {
+    const dur = Math.max(MIN_SEG_MS, s.sourceOutMs - s.sourceInMs);
+    const out: PlanSegment = { ...s, timelineStartMs: cursor, timelineEndMs: cursor + dur };
     cursor += dur;
-    return next;
+    return out;
   });
-  return { segments, totalDurationMs: cursor };
+  const newSectionEnd = cursor;
+  const delta = newSectionEnd - oldSectionEnd;
+
+  const updatedById = new Map<string, PlanSegment>();
+  for (const r of repositionedSection) updatedById.set(r.id, r);
+  for (const s of inOrder) {
+    if (updatedById.has(s.id)) continue;
+    if (s.timelineStartMs >= oldSectionEnd && delta !== 0) {
+      updatedById.set(s.id, {
+        ...s,
+        timelineStartMs: s.timelineStartMs + delta,
+        timelineEndMs: s.timelineEndMs + delta,
+      });
+    } else {
+      updatedById.set(s.id, s);
+    }
+  }
+
+  const next = plan.segments.map((s) => updatedById.get(s.id) ?? s);
+  const totalDurationMs = Math.max(
+    plan.totalDurationMs,
+    ...next.map((s) => s.timelineEndMs),
+  );
+  return { segments: next, totalDurationMs };
 }
 
 export function Timeline({
@@ -92,8 +176,7 @@ export function Timeline({
 
   const updateSegment = useCallback(
     (id: string, patch: Partial<PlanSegment>) => {
-      const next = plan.segments.map((s) => (s.id === id ? { ...s, ...patch } : s));
-      onChange(recompute({ ...plan, segments: next }));
+      onChange(applySegmentPatch(plan, id, patch));
     },
     [plan, onChange],
   );
@@ -126,21 +209,10 @@ export function Timeline({
     const sectionSegs = ordered.filter((s) => s.section === section);
     const byId = Object.fromEntries(sectionSegs.map((s) => [s.id, s]));
     const newSectionSegs = reorderedIdsForSection.map((id) => byId[id]);
-    let cursor = 0;
-    const next: PlanSegment[] = [];
-    for (const sec of SECTIONS) {
-      const arr = sec === section ? newSectionSegs : ordered.filter((s) => s.section === sec);
-      next.push(...arr);
-    }
-    // Recompute timeline positions
-    cursor = 0;
-    const repositioned = next.map((s) => {
-      const dur = s.sourceOutMs - s.sourceInMs;
-      const out = { ...s, timelineStartMs: cursor, timelineEndMs: cursor + dur };
-      cursor += dur;
-      return out;
-    });
-    onChange({ segments: repositioned, totalDurationMs: cursor });
+    // Ripple-reorder: keep the section anchored where it started, lay the
+    // reordered segments back-to-back from there, shift later sections by
+    // the resulting delta. Gaps elsewhere in the plan are preserved.
+    onChange(applySectionReorder(plan, section, newSectionSegs));
   };
 
   // Section windows — derived from segment positions (start of first, end of last per section).

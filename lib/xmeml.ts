@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { EditPlan, SourceClip } from "@/lib/types";
 
 /**
@@ -93,7 +94,6 @@ export function buildXmeml(opts: {
   /** Absolute path on the local filesystem to each clip's source file. */
   clipAbsPath: Record<string, string>;
   voiceoverAbsPath: string;
-  voiceoverFilename: string;
   voiceoverDurationMs: number;
 }): string {
   const {
@@ -102,7 +102,6 @@ export function buildXmeml(opts: {
     clips,
     clipAbsPath,
     voiceoverAbsPath,
-    voiceoverFilename,
     voiceoverDurationMs,
   } = opts;
 
@@ -177,6 +176,13 @@ ${extraIndent}</file>`;
     const fileId = fileIdByClip.get(seg.clipId)!;
     const isImage = clip.kind === "image";
 
+    // The on-disk basename includes our upload-side prefix (e.g.
+    // "abc123_Master_s_Footage.mp4"). Premiere's relink-by-name prompts
+    // use this basename — making <name> match the actual file on disk
+    // means a user who downloads the source clips to any folder can
+    // point Premiere at one and the rest get found automatically.
+    const storedBasename = path.basename(abs);
+
     const sourceTotalFrames = isImage
       ? IMAGE_SOURCE_FRAMES
       : Math.max(1, msToFrames(clip.durationMs));
@@ -188,7 +194,7 @@ ${extraIndent}</file>`;
 
     const fileEl = buildFileElement(
       fileId,
-      clip.filename,
+      storedBasename,
       fileUrl(abs),
       sourceTotalFrames,
       isImage,
@@ -199,7 +205,7 @@ ${extraIndent}</file>`;
 
     videoClipitems.push(
       `        <clipitem id="ci-v-${i + 1}">
-          <name>${xmlEscape(clip.filename)}</name>
+          <name>${xmlEscape(storedBasename)}</name>
           <enabled>TRUE</enabled>
           <duration>${sourceTotalFrames}</duration>
 ${RATE.split("\n").map((l) => "    " + l).join("\n")}
@@ -213,11 +219,14 @@ ${fileEl}
   });
 
   // ---- Voiceover on the audio track ----
+  // Same on-disk-basename rule as clips: match what the user has on their
+  // machine after download so Premiere's relink-by-name lands cleanly.
+  const voStoredBasename = path.basename(voiceoverAbsPath);
   const voFileId = "file-vo";
   const voDurationFrames = Math.max(1, msToFrames(voiceoverDurationMs));
   const voFileEl = buildFileElement(
     voFileId,
-    voiceoverFilename,
+    voStoredBasename,
     fileUrl(voiceoverAbsPath),
     voDurationFrames,
     false,
@@ -226,7 +235,7 @@ ${fileEl}
     "          ",
   );
   const voClipitem = `        <clipitem id="ci-a-1">
-          <name>${xmlEscape(voiceoverFilename)}</name>
+          <name>${xmlEscape(voStoredBasename)}</name>
           <enabled>TRUE</enabled>
           <duration>${voDurationFrames}</duration>
 ${RATE.split("\n").map((l) => "    " + l).join("\n")}

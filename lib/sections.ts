@@ -108,9 +108,20 @@ function alignLines(
 
 /**
  * Map tagged script lines + word timestamps → 5 section windows.
- * A section's window spans from its first line's start to its last line's end.
- * Sections with no lines collapse to a zero-length boundary point.
- * The final section's end is clamped to the voiceover duration.
+ *
+ * A section's window always starts at the previous section's end (or 0 for
+ * the first), so inter-section silences are absorbed as the lead-in of the
+ * later section. This eliminates the gap-in-plan bug where neither section
+ * owned the silent stretch between sentences, and the renderer/editor
+ * collapsed those moments. The lead-in time becomes establishing-shot
+ * territory for the AI.
+ *
+ * Per-line timings (when each line is actually spoken relative to the
+ * voiceover) are returned on each window so the match-phase prompt can
+ * tell Gemini exactly where speech happens vs. silence within each section.
+ *
+ * The final section's end is clamped to the voiceover duration so trailing
+ * silence is also covered.
  */
 export function computeSectionWindows(
   lines: ScriptLine[],
@@ -136,23 +147,33 @@ export function computeSectionWindows(
     startMs: 0,
     endMs: 0,
     lines: grouped[id],
+    lineTimings: {},
   }));
 
   let lastEnd = 0;
   for (const w of windows) {
-    let startMs = lastEnd;
+    // Window starts where the previous one ended — silences between sections
+    // get absorbed into the later section's lead-in.
+    const startMs = lastEnd;
     let endMs = lastEnd;
     const times = w.lines
       .map((l) => lineTimes.get(l.id))
       .filter((t): t is { startMs: number; endMs: number } => !!t);
     if (times.length) {
-      startMs = Math.min(...times.map((t) => t.startMs));
       endMs = Math.max(...times.map((t) => t.endMs));
     }
-    startMs = Math.max(startMs, lastEnd);
     endMs = Math.max(endMs, startMs);
     w.startMs = startMs;
     w.endMs = endMs;
+
+    // Per-line timing for the AI's match prompt.
+    const timings: Record<string, { startMs: number; endMs: number }> = {};
+    for (const l of w.lines) {
+      const t = lineTimes.get(l.id);
+      if (t) timings[l.id] = { startMs: t.startMs, endMs: t.endMs };
+    }
+    w.lineTimings = timings;
+
     lastEnd = endMs;
   }
 

@@ -57,6 +57,14 @@ export interface SectionWindow {
   startMs: number;
   endMs: number;
   lines: ScriptLine[];
+  /**
+   * Per-line spoken-word timing within the voiceover (absolute ms, not
+   * relative to the section). Populated by computeSectionWindows. Used by
+   * the match-phase prompt so Gemini can see exactly when in a window
+   * speech happens vs. silence — enabling smart establishing/breathing
+   * visuals for silent lead-ins/trails.
+   */
+  lineTimings?: Record<string, { startMs: number; endMs: number }>;
 }
 
 export interface FrameDescription {
