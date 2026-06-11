@@ -47,6 +47,14 @@ export interface SourceClip {
    * not match" error.
    */
   hasAudio?: boolean;
+  /**
+   * Channel count of the first audio stream when hasAudio is true (1 =
+   * mono, 2 = stereo, 6 = 5.1, …). XMEML's <channelcount> MUST match
+   * the actual file or Premiere refuses to relink with "channel type
+   * does not match". Same class of bug as hasAudio. Undefined when the
+   * clip has no audio.
+   */
+  audioChannels?: number;
 }
 
 export interface ScriptLine {

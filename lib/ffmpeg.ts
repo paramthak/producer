@@ -19,6 +19,17 @@ export interface ProbeResult {
    * "Cannot Link Media — type does not match" and refuses.
    */
   hasAudio: boolean;
+  /**
+   * Number of audio channels in the first audio stream (1 = mono,
+   * 2 = stereo, 6 = 5.1, ...). Undefined when hasAudio is false. The
+   * XMEML <channelcount> MUST match this or Premiere rejects the relink
+   * with "different channel type" — the same class of bug as hasAudio.
+   */
+  audioChannels?: number;
+  /** Sample rate in Hz of the first audio stream, e.g. 44100 or 48000. */
+  audioSampleRate?: number;
+  /** Bit depth of the first audio stream when reported (PCM only). */
+  audioBitDepth?: number;
 }
 
 export async function probe(file: string): Promise<ProbeResult> {
@@ -35,19 +46,34 @@ export async function probe(file: string): Promise<ProbeResult> {
   const json = JSON.parse(out);
   const streams = (json.streams as Array<Record<string, unknown>> | undefined) ?? [];
   const video = streams.find((s) => s.codec_type === "video");
-  const hasAudio = streams.some((s) => s.codec_type === "audio");
-  const durationSec = Number(json.format?.duration ?? video?.duration ?? 0);
+  const audio = streams.find((s) => s.codec_type === "audio");
+  const hasAudio = !!audio;
+  const durationSec = Number(json.format?.duration ?? video?.duration ?? audio?.duration ?? 0);
   let fps: number | undefined;
   if (video?.avg_frame_rate && typeof video.avg_frame_rate === "string") {
     const [num, den] = video.avg_frame_rate.split("/").map(Number);
     if (den) fps = num / den;
   }
+  // ffprobe surfaces audio channel count as `channels` (number) and sample
+  // rate as `sample_rate` (string). `bits_per_raw_sample` only appears
+  // for PCM-ish formats; lossy codecs omit it.
+  const audioChannels =
+    typeof audio?.channels === "number" ? audio.channels : undefined;
+  const audioSampleRate = audio?.sample_rate
+    ? Number(audio.sample_rate as string)
+    : undefined;
+  const audioBitDepth = audio?.bits_per_raw_sample
+    ? Number(audio.bits_per_raw_sample as string)
+    : undefined;
   return {
     durationMs: Math.round(durationSec * 1000),
     width: video?.width as number | undefined,
     height: video?.height as number | undefined,
     fps,
     hasAudio,
+    audioChannels,
+    audioSampleRate,
+    audioBitDepth,
   };
 }
 

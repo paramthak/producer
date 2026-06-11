@@ -55,6 +55,7 @@ export async function POST(req: NextRequest) {
     clipAbsPath: clipAbs,
     voiceoverAbsPath: path.join(p.base, m.voiceover.relPath),
     voiceoverDurationMs: alignment.durationMs,
+    voiceoverChannels: m.voiceover.channels,
     clipNames,
     voiceoverName: m.voiceover.filename,
   });

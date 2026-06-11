@@ -7,7 +7,14 @@ export interface SessionManifest {
   sessionId: string;
   createdAt: number;
   clips: SourceClip[];
-  voiceover: { filename: string; relPath: string; url: string; sizeBytes: number } | null;
+  voiceover: {
+    filename: string;
+    relPath: string;
+    url: string;
+    sizeBytes: number;
+    /** Channel count of the voiceover audio (1 = mono, 2 = stereo, ...). */
+    channels?: number;
+  } | null;
   script: ScriptLine[];
   overridePrompt: string;
   /**

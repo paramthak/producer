@@ -96,6 +96,13 @@ export function buildXmeml(opts: {
   voiceoverAbsPath: string;
   voiceoverDurationMs: number;
   /**
+   * Channel count of the voiceover audio (1 = mono, 2 = stereo, ...).
+   * Must match the actual file or Premiere rejects the relink with
+   * "different channel type". Defaults to 2 only as a last-resort
+   * fallback for legacy sessions that didn't capture it on upload.
+   */
+  voiceoverChannels?: number;
+  /**
    * Optional clipId → display name override. When provided, becomes the
    * value used for both <name> (Premiere bin label) AND the basename of
    * <pathurl>. The default falls back to clip.filename (original upload
@@ -117,6 +124,7 @@ export function buildXmeml(opts: {
     clipAbsPath,
     voiceoverAbsPath,
     voiceoverDurationMs,
+    voiceoverChannels,
     clipNames,
     voiceoverName,
   } = opts;
@@ -137,6 +145,7 @@ export function buildXmeml(opts: {
     isImage: boolean,
     isVideo: boolean,
     isAudio: boolean,
+    audioChannelCount: number,
     extraIndent: string,
   ): string {
     if (fileDefined.has(fileId)) {
@@ -159,7 +168,7 @@ ${extraIndent}${audioSampleCharacteristics()
         .split("\n")
         .map((l) => "    " + l)
         .join("\n")}
-${extraIndent}      <channelcount>2</channelcount>
+${extraIndent}      <channelcount>${audioChannelCount}</channelcount>
 ${extraIndent}    </audio>`);
     }
 
@@ -213,6 +222,10 @@ ${extraIndent}</file>`;
     // video-only and declared video-only is the safer mismatch than the
     // reverse.
     const hasAudio = !isImage && (clip.hasAudio ?? false);
+    // Channel count MUST match too — mono file declared stereo (or vice
+    // versa) gets rejected with "different channel type". Probed at
+    // upload; legacy fallback of 2 only if missing.
+    const clipAudioChannels = clip.audioChannels ?? 2;
 
     const sourceTotalFrames = isImage
       ? IMAGE_SOURCE_FRAMES
@@ -231,6 +244,7 @@ ${extraIndent}</file>`;
       isImage,
       true, // has video
       hasAudio, // honest declaration — see comment above
+      clipAudioChannels,
       "          ",
     );
 
@@ -258,6 +272,10 @@ ${fileEl}
   const voPathForUrl = path.join(voPathDir, voDisplayName);
   const voFileId = "file-vo";
   const voDurationFrames = Math.max(1, msToFrames(voiceoverDurationMs));
+  // ElevenLabs voiceovers are typically mono (1 channel). Hardcoding the
+  // legacy 2 was the bug that broke voiceover relink with "different
+  // channel type". Use the probed value; defensive fallback to 2.
+  const voChannels = voiceoverChannels ?? 2;
   const voFileEl = buildFileElement(
     voFileId,
     voDisplayName,
@@ -266,6 +284,7 @@ ${fileEl}
     false,
     false,
     true,
+    voChannels,
     "          ",
   );
   const voClipitem = `        <clipitem id="ci-a-1">

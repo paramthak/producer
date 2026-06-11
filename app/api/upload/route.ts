@@ -178,11 +178,19 @@ export async function POST(req: NextRequest) {
     await fs.mkdir(path.dirname(abs), { recursive: true });
     // Replace any existing voiceover atomically.
     await fs.rename(partPath, abs);
+    // Use the full probe() rather than probeAudioDurationMs() so we also
+    // capture the channel count — XMEML's <channelcount> must match the
+    // actual file or Premiere refuses to relink. ElevenLabs MP3s are
+    // typically mono (1 channel); without this they'd ship as the legacy
+    // hardcoded 2 and break.
     let durationMs = 0;
+    let channels: number | undefined;
     try {
-      durationMs = await probeAudioDurationMs(abs);
+      const probed = await probe(abs);
+      durationMs = probed.durationMs;
+      channels = probed.audioChannels;
     } catch {
-      /* best effort */
+      /* best effort — leave channels undefined; XML falls back to 2 */
     }
     const stats = await fs.stat(abs);
     manifest.voiceover = {
@@ -190,6 +198,7 @@ export async function POST(req: NextRequest) {
       relPath: rel,
       url: mediaUrl(sessionId, rel),
       sizeBytes: stats.size,
+      channels,
     };
     await saveManifest(manifest);
     return NextResponse.json({ sessionId, voiceover: manifest.voiceover, durationMs });
@@ -212,6 +221,7 @@ export async function POST(req: NextRequest) {
   // footage frequently has no audio track and Premiere refuses to relink
   // a file claiming audio against a file with no audio stream.
   let hasAudio = false;
+  let audioChannels: number | undefined;
   if (clipKind === "video") {
     try {
       const probed = await probe(abs);
@@ -220,6 +230,7 @@ export async function POST(req: NextRequest) {
       height = probed.height;
       fps = probed.fps;
       hasAudio = probed.hasAudio;
+      audioChannels = probed.audioChannels;
     } catch {
       /* best effort */
     }
@@ -238,6 +249,7 @@ export async function POST(req: NextRequest) {
     fps,
     sizeBytes: stats.size,
     hasAudio,
+    audioChannels,
   };
   manifest.clips.push(clip);
   await saveManifest(manifest);

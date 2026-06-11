@@ -98,6 +98,7 @@ export function buildBundleZip(opts: BundleOpts): Readable {
     clipAbsPath,
     voiceoverAbsPath,
     voiceoverDurationMs,
+    voiceoverChannels: manifest.voiceover?.channels,
     clipNames,
     voiceoverName,
   });

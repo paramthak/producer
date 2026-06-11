@@ -23,7 +23,13 @@ export interface ManifestShape {
   sessionId: string;
   createdAt: number;
   clips: SourceClip[];
-  voiceover: { filename: string; relPath: string; url: string; sizeBytes: number } | null;
+  voiceover: {
+    filename: string;
+    relPath: string;
+    url: string;
+    sizeBytes: number;
+    channels?: number;
+  } | null;
   script: ScriptLine[];
   overridePrompt: string;
   preview?: {
