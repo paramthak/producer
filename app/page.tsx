@@ -54,6 +54,14 @@ interface EditorData {
       planHash: string;
       renderedAt: number;
     };
+    costs?: {
+      totalUsd: number;
+      breakdown: {
+        describe: { calls: number; inputTokens: number; outputTokens: number; usd: number };
+        match: { calls: number; inputTokens: number; outputTokens: number; usd: number };
+        align: { calls: number; audioMs: number; usd: number };
+      };
+    };
   };
   plan: EditPlan;
   sections: { windows: SectionWindow[]; totalDurationMs: number };
@@ -362,6 +370,10 @@ export default function StudioPage() {
             </Button>
             {mode === "edit" && editor && (
               <>
+                <CostChip
+                  totalUsd={editor.manifest.costs?.totalUsd ?? 0}
+                  breakdown={editor.manifest.costs?.breakdown}
+                />
                 <Button
                   variant="ghost"
                   size="sm"
@@ -736,6 +748,40 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg border border-border/60 bg-background/40 px-2 py-3">
       <div className="font-display text-lg font-semibold tabular-nums">{value}</div>
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
+/**
+ * Cumulative-cost pill shown next to the export buttons in edit mode.
+ * Hovering reveals a per-phase breakdown so the user can see where the
+ * dollars went (Gemini describe / match / ElevenLabs alignment).
+ */
+function CostChip({
+  totalUsd,
+  breakdown,
+}: {
+  totalUsd: number;
+  breakdown?: {
+    describe: { calls: number; inputTokens: number; outputTokens: number; usd: number };
+    match: { calls: number; inputTokens: number; outputTokens: number; usd: number };
+    align: { calls: number; audioMs: number; usd: number };
+  };
+}) {
+  const tooltip = breakdown
+    ? [
+        `Gemini describe: $${breakdown.describe.usd.toFixed(4)} (${breakdown.describe.calls} calls, ${breakdown.describe.inputTokens.toLocaleString()} in / ${breakdown.describe.outputTokens.toLocaleString()} out tokens)`,
+        `Gemini match: $${breakdown.match.usd.toFixed(4)} (${breakdown.match.calls} calls, ${breakdown.match.inputTokens.toLocaleString()} in / ${breakdown.match.outputTokens.toLocaleString()} out tokens)`,
+        `ElevenLabs align: $${breakdown.align.usd.toFixed(4)} (${breakdown.align.calls} calls, ${(breakdown.align.audioMs / 1000).toFixed(1)}s audio)`,
+      ].join("\n")
+    : "No API spend yet this session";
+  return (
+    <div
+      className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-background/60 px-2.5 py-1 font-mono text-xs tabular-nums text-muted-foreground"
+      title={tooltip}
+    >
+      <span className="text-[10px] uppercase tracking-wider">API</span>
+      <span className="font-semibold text-foreground">${totalUsd.toFixed(2)}</span>
     </div>
   );
 }

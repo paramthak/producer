@@ -55,7 +55,17 @@ const responseSchema = {
   },
 } as const;
 
-export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Promise<EditPlan> {
+export interface MatchUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface MatchResult {
+  plan: EditPlan;
+  usage: MatchUsage;
+}
+
+export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Promise<MatchResult> {
   const { windows, clips, analyses, overridePrompt } = input;
 
   // Build the structured prompt: section windows + per-section candidate clips with descriptions.
@@ -158,5 +168,17 @@ export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Pro
     ? windows[windows.length - 1].endMs
     : segments.reduce((m, s) => Math.max(m, s.timelineEndMs), 0);
 
-  return { segments, totalDurationMs: total };
+  const usage: MatchUsage = {
+    inputTokens:
+      (result as unknown as { usageMetadata?: { promptTokenCount?: number } })
+        .usageMetadata?.promptTokenCount ?? 0,
+    outputTokens:
+      (result as unknown as { usageMetadata?: { candidatesTokenCount?: number } })
+        .usageMetadata?.candidatesTokenCount ?? 0,
+  };
+
+  return {
+    plan: { segments, totalDurationMs: total },
+    usage,
+  };
 }

@@ -25,6 +25,9 @@ export async function POST() {
 
   const existing = await loadManifest(sessionId);
   if (!existing) {
+    // New manifests start with no costs field; UI treats absent as $0.00.
+    // Cost is per-session by design — flushing happens implicitly when a
+    // brand-new sessionId mints a brand-new manifest.
     await saveManifest({
       sessionId,
       createdAt: Date.now(),

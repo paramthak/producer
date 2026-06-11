@@ -37,6 +37,14 @@ export interface ManifestShape {
     planHash: string;
     renderedAt: number;
   };
+  costs?: {
+    totalUsd: number;
+    breakdown: {
+      describe: { calls: number; inputTokens: number; outputTokens: number; usd: number };
+      match: { calls: number; inputTokens: number; outputTokens: number; usd: number };
+      align: { calls: number; audioMs: number; usd: number };
+    };
+  };
 }
 
 export function useSessionManifest() {

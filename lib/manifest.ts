@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { paths, readJson, writeJson } from "@/lib/session";
+import type { SessionCosts } from "@/lib/costs";
 import type { SourceClip, ScriptLine } from "@/lib/types";
 
 export interface SessionManifest {
@@ -28,6 +29,12 @@ export interface SessionManifest {
     planHash: string;
     renderedAt: number;
   };
+  /**
+   * Cumulative API spend this session (Gemini + ElevenLabs). Updated as
+   * each phase completes. Reset on new-session creation. Undefined for
+   * brand-new manifests; UI treats undefined as zero.
+   */
+  costs?: SessionCosts;
 }
 
 export async function loadManifest(sessionId: string): Promise<SessionManifest | null> {

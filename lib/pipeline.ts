@@ -10,6 +10,13 @@ import { forcedAlign } from "@/lib/elevenlabs/forcedAlign";
 import { computeSectionWindows } from "@/lib/sections";
 import { matchAndTrim } from "@/lib/gemini/matchAndTrim";
 import { hashPlan } from "@/lib/planHash";
+import {
+  addAlignCost,
+  addDescribeCost,
+  addMatchCost,
+  emptyCosts,
+  type SessionCosts,
+} from "@/lib/costs";
 import type {
   ClipAnalysis,
   EditPlan,
@@ -115,7 +122,11 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
   if (aborted(jobId)) return finishStopped(jobId);
 
   // --- Phase 3: Analyse frames ----------------------------------------------------------------
+  // Token usage from each parallel describe call is accumulated locally
+  // (avoids manifest-write races under pLimit concurrency) and rolled
+  // into the session costs once the phase finishes.
   const analyses: Record<string, ClipAnalysis> = {};
+  const describeUsages: Array<{ inputTokens: number; outputTokens: number }> = [];
   try {
     setPhase(jobId, "analyse", "running", "Analysing clips with Gemini 3.5 Flash…");
     const limit = pLimit(CLIP_CONCURRENCY);
@@ -135,7 +146,7 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
             return;
           }
           const fr = framesByClip.get(clip.id)!;
-          const a = await describeClip(
+          const r = await describeClip(
             {
               clipId: clip.id,
               section: clip.section,
@@ -145,14 +156,20 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
             },
             sigGetter(),
           );
-          analyses[clip.id] = a;
-          await writeJson(cachePath, a);
+          analyses[clip.id] = r.analysis;
+          describeUsages.push(r.usage);
+          await writeJson(cachePath, r.analysis);
           done += 1;
           setPhase(jobId, "analyse", "running", `${done} of ${total} analysed`, done / total);
         }),
       ),
     );
     if (aborted(jobId)) return finishStopped(jobId);
+    if (describeUsages.length) {
+      await updateSessionCosts(sessionId, (c) => {
+        for (const u of describeUsages) addDescribeCost(c, u.inputTokens, u.outputTokens);
+      });
+    }
     setPhase(jobId, "analyse", "complete", `${Object.keys(analyses).length} clips analysed`);
   } catch (err) {
     fail(jobId, "analyse", err);
@@ -176,6 +193,9 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
       words = await forcedAlign(voPath, scriptText, sigGetter());
       voDurationMs = words.length ? Math.max(...words.map((w) => w.endMs)) : 0;
       await writeJson(p.alignment, { words, durationMs: voDurationMs });
+      // Cost is per audio-minute of the voiceover; only count it when we
+      // actually hit ElevenLabs (cache hits are free).
+      await updateSessionCosts(sessionId, (c) => addAlignCost(c, voDurationMs));
     }
     setPhase(jobId, "align", "complete", `${words.length} words aligned`);
   } catch (err) {
@@ -199,7 +219,7 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
   let plan: EditPlan;
   try {
     setPhase(jobId, "match", "running", "Matching + trimming with Gemini 3.1 Pro…");
-    plan = await matchAndTrim(
+    const matchResult = await matchAndTrim(
       {
         windows,
         clips: manifest.clips,
@@ -207,6 +227,10 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
         overridePrompt: opts.overridePrompt ?? manifest.overridePrompt ?? "",
       },
       sigGetter(),
+    );
+    plan = matchResult.plan;
+    await updateSessionCosts(sessionId, (c) =>
+      addMatchCost(c, matchResult.usage.inputTokens, matchResult.usage.outputTokens),
     );
     setPhase(jobId, "match", "complete", `${plan.segments.length} segments`);
   } catch (err) {
@@ -348,6 +372,25 @@ export async function runRenderOnly(opts: {
 function finishStopped(jobId: string) {
   const job = jobStore.get(jobId);
   if (job && job.status === "running") jobStore.finish(jobId, "failed", "Stopped by user");
+}
+
+/**
+ * Read-modify-write the session's costs counter. The mutator runs against
+ * a freshly-loaded SessionCosts (existing or empty) so callers don't need
+ * to think about defaults. Single-process app + per-phase serialization
+ * means no concurrent writer races us in practice; the brief read-modify-
+ * write window is tighter than any phase's other I/O.
+ */
+async function updateSessionCosts(
+  sessionId: string,
+  mutate: (c: SessionCosts) => void,
+): Promise<void> {
+  const m = await loadManifest(sessionId);
+  if (!m) return;
+  const costs = m.costs ?? emptyCosts();
+  mutate(costs);
+  m.costs = costs;
+  await saveManifest(m);
 }
 
 /**

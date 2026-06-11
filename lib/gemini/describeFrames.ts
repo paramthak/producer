@@ -43,7 +43,22 @@ const responseSchema = {
   },
 } as const;
 
-export async function describeClip(input: DescribeInput, signal?: AbortSignal): Promise<ClipAnalysis> {
+/**
+ * One describe call's API token usage. Surfaced to the pipeline so it can
+ * accumulate per-session cost without each leaf function touching the
+ * manifest (avoids races on parallel describe calls).
+ */
+export interface DescribeUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface DescribeResult {
+  analysis: ClipAnalysis;
+  usage: DescribeUsage;
+}
+
+export async function describeClip(input: DescribeInput, signal?: AbortSignal): Promise<DescribeResult> {
   if (input.framePaths.length !== input.timestamps.length) {
     throw new Error("describeClip: framePaths and timestamps mismatched");
   }
@@ -101,9 +116,21 @@ export async function describeClip(input: DescribeInput, signal?: AbortSignal): 
     description: f.description ?? "",
   }));
 
+  const usage: DescribeUsage = {
+    inputTokens:
+      (result as unknown as { usageMetadata?: { promptTokenCount?: number } })
+        .usageMetadata?.promptTokenCount ?? 0,
+    outputTokens:
+      (result as unknown as { usageMetadata?: { candidatesTokenCount?: number } })
+        .usageMetadata?.candidatesTokenCount ?? 0,
+  };
+
   return {
-    clipId: input.clipId,
-    summary: parsed.summary ?? "",
-    frames,
+    analysis: {
+      clipId: input.clipId,
+      summary: parsed.summary ?? "",
+      frames,
+    },
+    usage,
   };
 }
