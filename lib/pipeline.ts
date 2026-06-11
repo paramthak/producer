@@ -2,13 +2,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import pLimit from "p-limit";
 import { paths, readJson, writeJson } from "@/lib/session";
-import { loadManifest } from "@/lib/manifest";
+import { loadManifest, saveManifest, type SessionManifest } from "@/lib/manifest";
 import { jobStore } from "@/lib/jobStore";
-import { extractFrames } from "@/lib/ffmpeg";
+import { extractFrames, renderFinalMp4 } from "@/lib/ffmpeg";
 import { describeClip } from "@/lib/gemini/describeFrames";
 import { forcedAlign } from "@/lib/elevenlabs/forcedAlign";
 import { computeSectionWindows } from "@/lib/sections";
 import { matchAndTrim } from "@/lib/gemini/matchAndTrim";
+import { hashPlan } from "@/lib/planHash";
 import type {
   ClipAnalysis,
   EditPlan,
@@ -214,16 +215,134 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
   if (aborted(jobId)) return finishStopped(jobId);
 
   // --- Phase 7: Assemble preview --------------------------------------------------------------
+  let assembledPlan: EditPlan | null = null;
   try {
     setPhase(jobId, "assemble", "running", "Filling gaps + holds…");
-    const filled = applyHoldFills(plan, windows, manifest.clips);
-    await writeJson(p.editPlan, filled);
+    assembledPlan = applyHoldFills(plan, windows, manifest.clips);
+    await writeJson(p.editPlan, assembledPlan);
     setPhase(jobId, "assemble", "complete", "Ready");
   } catch (err) {
     fail(jobId, "assemble", err);
   }
+  if (aborted(jobId)) return finishStopped(jobId);
+
+  // --- Phase 8: Render preview MP4 ------------------------------------------------------------
+  // Rendering at pipeline-end (rather than on demand at download time) means
+  // the editor's Preview can play ONE small MP4 instead of streaming N raw
+  // source clips in parallel — which is the difference between "works" and
+  // "unusable" once this is deployed behind a public network.
+  try {
+    setPhase(jobId, "render", "running", "Rendering preview MP4…");
+    await renderPreviewForSession({
+      sessionId,
+      plan: assembledPlan!,
+      manifest,
+      signal: sigGetter(),
+    });
+    setPhase(jobId, "render", "complete", "Preview rendered");
+  } catch (err) {
+    fail(jobId, "render", err);
+  }
 
   jobStore.finish(jobId, "complete");
+}
+
+/**
+ * Render the final MP4 from the session's current edit plan and persist
+ * the result on the manifest (`manifest.preview`). Used by both the main
+ * pipeline (final phase) and the standalone /api/render endpoint that the
+ * editor calls when the user clicks "Re-render preview" after editing.
+ *
+ * The output filename embeds the plan hash, so the cached MP4 is naturally
+ * keyed by what plan produced it — the frontend's stale check is just a
+ * hash comparison.
+ */
+export async function renderPreviewForSession(opts: {
+  sessionId: string;
+  plan: EditPlan;
+  manifest: SessionManifest;
+  signal?: AbortSignal;
+}): Promise<{ filename: string; planHash: string }> {
+  const { sessionId, plan, manifest, signal } = opts;
+  const p = paths(sessionId);
+  if (!manifest.voiceover) {
+    throw new Error("renderPreviewForSession: voiceover missing");
+  }
+
+  const clipsById = Object.fromEntries(manifest.clips.map((c) => [c.id, c]));
+  const segments: import("@/lib/ffmpeg").RenderSegment[] = plan.segments
+    .map((seg) => {
+      const clip = clipsById[seg.clipId];
+      if (!clip) return null;
+      const dur = (seg.timelineEndMs - seg.timelineStartMs) / 1000;
+      if (dur <= 0) return null;
+      return {
+        inputPath: path.join(p.base, clip.relPath),
+        isImage: clip.kind === "image",
+        startSec: clip.kind === "image" ? 0 : seg.sourceInMs / 1000,
+        durationSec: dur,
+      };
+    })
+    .filter((x): x is import("@/lib/ffmpeg").RenderSegment => !!x);
+
+  if (!segments.length) throw new Error("renderPreviewForSession: no segments to render");
+
+  const planHash = hashPlan(plan);
+  const filename = `preview-${planHash}.mp4`;
+  const outPath = path.join(p.output, filename);
+  await renderFinalMp4({
+    segments,
+    voiceoverPath: path.join(p.base, manifest.voiceover.relPath),
+    outPath,
+    signal,
+  });
+
+  // Persist on the manifest so the editor can compare hashes for staleness.
+  const updated: SessionManifest = {
+    ...manifest,
+    preview: { filename, planHash, renderedAt: Date.now() },
+  };
+  await saveManifest(updated);
+
+  return { filename, planHash };
+}
+
+/**
+ * Run ONLY the render phase for an existing session whose edit plan is
+ * already on disk. Fired by the /api/render endpoint when the user
+ * clicks "Re-render preview" after editing the plan in the editor.
+ */
+export async function runRenderOnly(opts: {
+  jobId: string;
+  sessionId: string;
+}): Promise<void> {
+  const { jobId, sessionId } = opts;
+  const p = paths(sessionId);
+  const manifest = await loadManifest(sessionId);
+  if (!manifest) {
+    jobStore.finish(jobId, "failed", "Unknown session");
+    return;
+  }
+  const plan = await readJson<EditPlan>(p.editPlan);
+  if (!plan) {
+    jobStore.finish(jobId, "failed", "No edit plan to render");
+    return;
+  }
+  try {
+    setPhase(jobId, "render", "running", "Rendering preview MP4…");
+    await renderPreviewForSession({
+      sessionId,
+      plan,
+      manifest,
+      signal: jobStore.signal(jobId),
+    });
+    setPhase(jobId, "render", "complete", "Preview rendered");
+    jobStore.finish(jobId, "complete");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    jobStore.updatePhase(jobId, "render", { status: "failed", error: msg, detail: msg });
+    jobStore.finish(jobId, "failed", msg);
+  }
 }
 
 function finishStopped(jobId: string) {

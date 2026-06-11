@@ -172,15 +172,45 @@ export function ScriptPane({ value, onChange }: Props) {
             ),
           )}
         </pre>
+        {/*
+          Selection-color fix: textarea text is `text-transparent` so the
+          colored <pre> underneath shows through. But selecting text reveals
+          the textarea's "invisible" glyphs against the selection background
+          as ghost characters doubled with the <pre>'s colored version.
+          Forcing ::selection foreground to transparent keeps selected
+          glyphs invisible — only the <pre>'s coloring shows even when
+          highlighted.
+
+          Drag-drop suppression: the textarea has no business accepting
+          files. Without these handlers, the browser renders a file-preview
+          overlay (e.g. PDF icon) when something is dragged over.
+        */}
+        <style>{`
+          .producer-script-textarea::selection { color: transparent; }
+          .producer-script-textarea::-moz-selection { color: transparent; }
+        `}</style>
         <textarea
           ref={taRef}
           value={raw}
           onChange={(e) => setRaw(e.target.value)}
           onScroll={syncScroll}
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes("Files")) {
+              e.preventDefault();
+              e.stopPropagation();
+              e.dataTransfer.dropEffect = "none";
+            }
+          }}
+          onDrop={(e) => {
+            if (e.dataTransfer.types.includes("Files")) {
+              e.preventDefault();
+              e.stopPropagation();
+            }
+          }}
           spellCheck={false}
           placeholder={`Paste your script, then mark sections with inline labels.\n\nhook: …\nbridge: …\nproduct: …\noutro: …\ncta: …`}
           style={{ caretColor: "hsl(var(--foreground))" }}
-          className="relative block min-h-[15rem] w-full resize-y bg-transparent px-3 py-2 font-mono text-[13px] leading-[1.7] text-transparent caret-foreground outline-none placeholder:text-muted-foreground"
+          className="producer-script-textarea relative block min-h-[15rem] w-full resize-y bg-transparent px-3 py-2 font-mono text-[13px] leading-[1.7] text-transparent caret-foreground outline-none placeholder:text-muted-foreground"
           aria-label="Script text"
         />
       </div>

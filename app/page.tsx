@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import {
   ArrowRight,
   Download,
+  FileArchive,
   FileVideo,
   Loader2,
   Plus,
@@ -26,6 +27,7 @@ import { ElapsedTimer } from "@/components/processing/ElapsedTimer";
 import { Preview } from "@/components/editor/Preview";
 import { Timeline } from "@/components/editor/Timeline";
 import { resetSession, useSessionManifest } from "@/lib/builderStore";
+import { hashPlan } from "@/lib/planHash";
 import {
   PHASE_LABEL,
   SECTIONS,
@@ -39,6 +41,7 @@ import {
 import { formatDuration } from "@/lib/utils";
 
 type Mode = "setup" | "edit";
+type ExportKind = "mp4" | "xml" | "bundle";
 
 interface EditorData {
   manifest: {
@@ -46,6 +49,11 @@ interface EditorData {
     clips: SourceClip[];
     voiceover: { filename: string; relPath: string; url: string; sizeBytes: number } | null;
     overridePrompt: string;
+    preview?: {
+      filename: string;
+      planHash: string;
+      renderedAt: number;
+    };
   };
   plan: EditPlan;
   sections: { windows: SectionWindow[]; totalDurationMs: number };
@@ -62,12 +70,29 @@ export default function StudioPage() {
   const [editor, setEditor] = useState<EditorData | null>(null);
   const [plan, setPlan] = useState<EditPlan | null>(null);
   const [overridePrompt, setOverridePrompt] = useState("");
-  const [exporting, setExporting] = useState<"none" | "mp4" | "xml">("none");
+  const [exporting, setExporting] = useState<"none" | ExportKind>("none");
   const [seekReq, setSeekReq] = useState<{ ms: number; nonce: number } | null>(null);
   const [currentMs, setCurrentMs] = useState(0);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
+  // Render-only job (re-render preview MP4 after editing). Subscribed to the
+  // same /api/job/[id] SSE stream as the main pipeline; on complete we
+  // refetch the editor bundle so manifest.preview reflects the new render.
+  const [renderJobId, setRenderJobId] = useState<string | null>(null);
   const seekNonceRef = useRef(0);
+
+  // Current plan's hash, compared against manifest.preview.planHash to know
+  // if the cached preview MP4 is stale.
+  const currentPlanHash = useMemo(() => (plan ? hashPlan(plan) : null), [plan]);
+  const cachedPreview = editor?.manifest.preview ?? null;
+  const isPreviewStale = !!(
+    cachedPreview && currentPlanHash && cachedPreview.planHash !== currentPlanHash
+  );
+  const previewMp4Url = useMemo(() => {
+    if (!sessionId || !cachedPreview) return null;
+    return `/api/media/${sessionId}/output/${cachedPreview.filename}`;
+  }, [sessionId, cachedPreview]);
+  const isRendering = renderJobId !== null;
 
   // If a session already has a saved edit plan on disk, jump straight into edit mode.
   useEffect(() => {
@@ -208,7 +233,69 @@ export default function StudioPage() {
     setSeekReq({ ms, nonce: seekNonceRef.current });
   };
 
-  const exportFile = async (kind: "mp4" | "xml") => {
+  // Fire /api/render and let the SSE subscriber below pick up progress +
+  // completion. Reuses the same jobStore + /api/job/[id] mechanism as the
+  // main pipeline — no new infra needed client-side.
+  const onRequestRerender = useCallback(async () => {
+    if (!sessionId || renderJobId) return;
+    try {
+      const res = await fetch("/api/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error || "Could not start re-render");
+      }
+      const j = (await res.json()) as { jobId: string };
+      setRenderJobId(j.jobId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Re-render failed to start");
+    }
+  }, [sessionId, renderJobId]);
+
+  // Subscribe to the render job's SSE stream — refresh editor bundle on
+  // completion so manifest.preview points at the freshly rendered MP4 and
+  // the Preview reloads it.
+  useEffect(() => {
+    if (!renderJobId || !sessionId) return;
+    const es = new EventSource(`/api/job/${renderJobId}`, { withCredentials: false });
+    es.onmessage = async (ev) => {
+      try {
+        const data = JSON.parse(ev.data) as JobState | { error: string };
+        if ("error" in data) {
+          toast.error(data.error);
+          es.close();
+          setRenderJobId(null);
+          return;
+        }
+        if (data.status === "complete") {
+          es.close();
+          const res = await fetch(`/api/editor?sessionId=${sessionId}`);
+          if (res.ok) {
+            const j = (await res.json()) as EditorData;
+            setEditor(j);
+          }
+          setRenderJobId(null);
+          toast.success("Preview rendered");
+        } else if (data.status === "failed" || data.status === "stopped") {
+          es.close();
+          setRenderJobId(null);
+          toast.error(data.error ?? "Re-render failed");
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      setRenderJobId(null);
+    };
+    return () => es.close();
+  }, [renderJobId, sessionId]);
+
+  const exportFile = async (kind: ExportKind) => {
     if (!sessionId) return;
     setExporting(kind);
     try {
@@ -218,6 +305,14 @@ export default function StudioPage() {
         body: JSON.stringify({ sessionId }),
       });
       if (!res.ok) {
+        // The MP4 cache-passthrough returns 409 when the cached render is
+        // stale. Surface that as a clear prompt to re-render rather than a
+        // generic export-failed toast.
+        if (res.status === 409 && kind === "mp4") {
+          const j = (await res.json().catch(() => ({}))) as { error?: string; stale?: boolean };
+          toast.error(j.error ?? "Preview is stale — click Re-render in the editor first.");
+          return;
+        }
         const j = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(j.error || "Export failed. Try again.");
       }
@@ -225,12 +320,18 @@ export default function StudioPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `producer-${sessionId.slice(0, 6)}.${kind}`;
+      a.download = `producer-${sessionId.slice(0, 6)}.${kind === "bundle" ? "zip" : kind}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      toast.success(kind === "mp4" ? "Downloaded MP4" : "Downloaded XML — open in Premiere / Resolve / FCP");
+      const message =
+        kind === "mp4"
+          ? "Downloaded MP4"
+          : kind === "xml"
+            ? "Downloaded XML — open in Premiere / Resolve / FCP"
+            : "Downloaded project bundle — unzip and open the .xml in Premiere / Resolve / FCP";
+      toast.success(message);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Export failed");
     } finally {
@@ -261,9 +362,24 @@ export default function StudioPage() {
             </Button>
             {mode === "edit" && editor && (
               <>
-                <Button variant="outline" onClick={() => exportFile("xml")} disabled={exporting !== "none"}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => exportFile("xml")}
+                  disabled={exporting !== "none"}
+                  title="Download just the XML (you'll need to relink media manually)"
+                >
                   {exporting === "xml" ? <Loader2 className="size-4 animate-spin" /> : <FileVideo className="size-4" />}
-                  Open in editor (XML)
+                  XML only
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => exportFile("bundle")}
+                  disabled={exporting !== "none"}
+                  title="Download the XML + all source clips + voiceover as a .zip — Premiere opens it with zero relink"
+                >
+                  {exporting === "bundle" ? <Loader2 className="size-4 animate-spin" /> : <FileArchive className="size-4" />}
+                  Download project (.zip)
                 </Button>
                 <Button onClick={() => exportFile("mp4")} disabled={exporting !== "none"} size="lg">
                   {exporting === "mp4" ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
@@ -313,6 +429,10 @@ export default function StudioPage() {
               onPlanChange={onPlanChange}
               onRerun={() => startJob({ overridePrompt })}
               onBackToSetup={() => { setMode("setup"); setEditor(null); setPlan(null); }}
+              previewMp4Url={previewMp4Url}
+              isPreviewStale={isPreviewStale}
+              isRendering={isRendering}
+              onRequestRerender={onRequestRerender}
             />
           )
         )}
@@ -498,6 +618,10 @@ interface EditViewProps {
   onPlanChange: (p: EditPlan) => void;
   onRerun: () => void;
   onBackToSetup: () => void;
+  previewMp4Url: string | null;
+  isPreviewStale: boolean;
+  isRendering: boolean;
+  onRequestRerender: () => void;
 }
 
 function EditView({
@@ -514,6 +638,10 @@ function EditView({
   onPlanChange,
   onRerun,
   onBackToSetup,
+  previewMp4Url,
+  isPreviewStale,
+  isRendering,
+  onRequestRerender,
 }: EditViewProps) {
   const totalMs = plan.totalDurationMs || editor.alignment.durationMs;
   return (
@@ -553,9 +681,11 @@ function EditView({
           <Card className="w-full">
             <CardContent className="p-3">
               <Preview
+                previewMp4Url={previewMp4Url}
+                isStale={isPreviewStale}
+                isRendering={isRendering}
+                onRequestRerender={onRequestRerender}
                 segments={plan.segments}
-                clips={clipsMap}
-                voiceoverUrl={editor.manifest.voiceover!.url}
                 totalDurationMs={totalMs}
                 seekRequest={seekReq}
                 onTime={onTime}

@@ -3,6 +3,7 @@ import path from "node:path";
 import { paths, readJson } from "@/lib/session";
 import { loadManifest } from "@/lib/manifest";
 import { buildXmeml } from "@/lib/xmeml";
+import { disambiguateNames } from "@/lib/zipBundle";
 import type { EditPlan, WordTimestamp } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -38,6 +39,10 @@ export async function POST(req: NextRequest) {
 
   const clipsById = Object.fromEntries(m.clips.map((c) => [c.id, c]));
   const clipAbs = Object.fromEntries(m.clips.map((c) => [c.id, path.join(p.base, c.relPath)]));
+  // Use the same name disambiguation as the ZIP bundle so the standalone
+  // XML's <name> and <pathurl> basenames match what the user would have
+  // on disk if they re-downloaded the bundle. Premiere relinks by name.
+  const clipNames = disambiguateNames(m.clips);
 
   const xml = buildXmeml({
     projectName: `Producer-${body.sessionId.slice(0, 6)}`,
@@ -46,6 +51,8 @@ export async function POST(req: NextRequest) {
     clipAbsPath: clipAbs,
     voiceoverAbsPath: path.join(p.base, m.voiceover.relPath),
     voiceoverDurationMs: alignment.durationMs,
+    clipNames,
+    voiceoverName: m.voiceover.filename,
   });
 
   return new Response(xml, {

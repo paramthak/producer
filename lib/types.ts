@@ -108,6 +108,7 @@ export const PHASES = [
   "map",
   "match",
   "assemble",
+  "render",
 ] as const;
 export type PhaseId = (typeof PHASES)[number];
 
@@ -119,6 +120,7 @@ export const PHASE_LABEL: Record<PhaseId, string> = {
   map: "Map sections to voiceover",
   match: "Match + trim clips",
   assemble: "Assemble preview",
+  render: "Render preview MP4",
 };
 
 export type PhaseStatus = "pending" | "running" | "complete" | "failed" | "skipped";

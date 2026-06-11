@@ -26,6 +26,11 @@ export interface ManifestShape {
   voiceover: { filename: string; relPath: string; url: string; sizeBytes: number } | null;
   script: ScriptLine[];
   overridePrompt: string;
+  preview?: {
+    filename: string;
+    planHash: string;
+    renderedAt: number;
+  };
 }
 
 export function useSessionManifest() {

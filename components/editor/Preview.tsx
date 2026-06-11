@@ -1,132 +1,197 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Pause, Play } from "lucide-react";
+import { Loader2, Pause, Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { formatDuration } from "@/lib/utils";
-import type { EditPlan, SourceClip } from "@/lib/types";
+import type { EditPlan } from "@/lib/types";
 
 interface Props {
+  /**
+   * URL of the rendered preview MP4 (served via /api/media/<sessionId>/output/<filename>).
+   * When null, the preview hasn't been rendered yet — we show the empty
+   * state with a "Render preview" CTA.
+   */
+  previewMp4Url: string | null;
+  /**
+   * True when the current EditPlan's hash diverges from the cached
+   * manifest.preview.planHash — the rendered MP4 doesn't reflect the
+   * latest edits. We show a "Stale" indicator and the re-render button.
+   */
+  isStale: boolean;
+  /** True while /api/render is running. Shows a spinner overlay. */
+  isRendering: boolean;
+  onRequestRerender: () => void;
+  /** Used to compute active segment highlighting from currentTime. */
   segments: EditPlan["segments"];
-  clips: Record<string, SourceClip>;
-  voiceoverUrl: string;
+  /** Source-of-truth for the timeline length (in case the MP4 hasn't loaded). */
   totalDurationMs: number;
-  /** Optional controlled "seek to this ms" trigger; bump value to re-seek. */
+  /** Optional controlled "seek to this ms" trigger; bump nonce to re-seek. */
   seekRequest?: { ms: number; nonce: number } | null;
-  /** Fires on every rAF with the current audio time (ms). */
+  /** Fires on every rAF tick with the current playhead time (ms). */
   onTime?: (ms: number) => void;
+  /** Fires when the active segment changes. */
+  onActiveSegmentChange?: (segId: string | null) => void;
 }
 
-export function Preview({ segments, clips, voiceoverUrl, totalDurationMs, seekRequest, onTime }: Props) {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const [activeId, setActiveId] = useState<string | null>(null);
+/**
+ * Single-video preview.
+ *
+ * The rendered MP4 contains the full reel (all cuts + voiceover already
+ * baked in by ffmpeg at the end of the pipeline). So playback is just one
+ * <video> tag streaming one file — no parallel preloads, no source-clip
+ * switching, no audio sync logic. This is the difference between "works"
+ * and "unusable" once deployed behind a public network.
+ *
+ * Timeline chip clicks set currentTime via seekRequest. Active segment is
+ * derived from currentTime against the (cached client-side) plan.
+ */
+export function Preview({
+  previewMp4Url,
+  isStale,
+  isRendering,
+  onRequestRerender,
+  segments,
+  totalDurationMs,
+  seekRequest,
+  onTime,
+  onActiveSegmentChange,
+}: Props) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentMs, setCurrentMs] = useState(0);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const rafRef = useRef<number | null>(null);
 
+  // Apply external seek requests (clicking a segment chip in the Timeline).
   useEffect(() => {
     if (!seekRequest) return;
-    const a = audioRef.current;
-    if (!a) return;
-    a.currentTime = Math.min(seekRequest.ms / 1000, a.duration || seekRequest.ms / 1000);
+    const v = videoRef.current;
+    if (!v) return;
+    const targetSec = Math.max(0, seekRequest.ms / 1000);
+    if (Number.isFinite(v.duration) && v.duration > 0) {
+      v.currentTime = Math.min(targetSec, v.duration);
+    } else {
+      v.currentTime = targetSec;
+    }
     setCurrentMs(seekRequest.ms);
   }, [seekRequest]);
 
+  // Drive currentMs + active-segment highlighting from the video's currentTime.
   useEffect(() => {
     const tick = () => {
-      const a = audioRef.current;
-      if (a) {
-        const tMs = a.currentTime * 1000;
+      const v = videoRef.current;
+      if (v) {
+        const tMs = v.currentTime * 1000;
         setCurrentMs(tMs);
         onTime?.(tMs);
         const seg = segments.find((s) => tMs >= s.timelineStartMs && tMs < s.timelineEndMs);
         const id = seg?.id ?? null;
-        if (id !== activeId) setActiveId(id);
-        if (seg) {
-          const target = seg.sourceInMs + (tMs - seg.timelineStartMs);
-          const v = videoRefs.current.get(seg.id);
-          if (v && v.tagName === "VIDEO") {
-            const want = target / 1000;
-            if (Math.abs(v.currentTime - want) > 0.18) v.currentTime = want;
-            if (a.paused) {
-              try { v.pause(); } catch {}
-            } else if (v.paused) {
-              v.play().catch(() => {});
-            }
-          }
+        if (id !== activeId) {
+          setActiveId(id);
+          onActiveSegmentChange?.(id);
         }
       }
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
-    return () => { if (rafRef.current !== null) cancelAnimationFrame(rafRef.current); };
-  }, [segments, activeId, onTime]);
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, [segments, activeId, onTime, onActiveSegmentChange]);
 
   const toggle = () => {
-    const a = audioRef.current;
-    if (!a) return;
-    if (a.paused) { a.play().catch(() => {}); setPlaying(true); }
-    else { a.pause(); setPlaying(false); }
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) {
+      v.play().catch(() => {});
+      setPlaying(true);
+    } else {
+      v.pause();
+      setPlaying(false);
+    }
   };
+
+  const showEmptyState = !previewMp4Url;
 
   return (
     <div className="flex flex-col gap-3">
       <div className="relative mx-auto aspect-[9/16] w-full max-w-[18rem] max-h-[calc(100vh-19rem)] overflow-hidden rounded-2xl border border-border bg-black shadow-[0_24px_60px_-12px_rgb(0_0_0_/_0.6)]">
-        {segments.length === 0 && (
-          <div className="absolute inset-0 grid place-items-center text-xs text-muted-foreground">
-            No segments yet
+        {showEmptyState ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+            <p className="text-sm text-white/80">Preview not rendered yet</p>
+            <Button
+              variant="default"
+              size="sm"
+              onClick={onRequestRerender}
+              disabled={isRendering}
+              className="gap-1.5"
+            >
+              {isRendering ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              {isRendering ? "Rendering…" : "Render preview"}
+            </Button>
+          </div>
+        ) : (
+          <video
+            ref={videoRef}
+            src={previewMp4Url}
+            playsInline
+            preload="auto"
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+            onEnded={() => setPlaying(false)}
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+        )}
+
+        {/* Stale-render warning, only when we have an MP4 but the plan changed */}
+        {!showEmptyState && isStale && (
+          <div className="absolute left-3 top-3 z-20 inline-flex items-center gap-1.5 rounded-full bg-amber-500/20 px-2.5 py-1 text-[11px] font-medium text-amber-200 backdrop-blur-sm">
+            <span className="size-1.5 rounded-full bg-amber-300" />
+            Preview stale — re-render to see edits
           </div>
         )}
-        {segments.map((seg) => {
-          const clip = clips[seg.clipId];
-          if (!clip) return null;
-          const isActive = activeId === seg.id;
-          if (clip.kind === "image") {
-            return (
-              /* eslint-disable-next-line @next/next/no-img-element */
-              <img
-                key={seg.id}
-                src={clip.url}
-                alt=""
-                className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-150 ${isActive ? "opacity-100" : "opacity-0"}`}
-              />
-            );
-          }
-          return (
-            <video
-              key={seg.id}
-              ref={(el) => {
-                if (el) videoRefs.current.set(seg.id, el);
-                else videoRefs.current.delete(seg.id);
-              }}
-              src={clip.url}
-              muted
-              playsInline
-              preload="auto"
-              className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-150 ${isActive ? "opacity-100" : "opacity-0"}`}
-            />
-          );
-        })}
 
-        <audio
-          ref={audioRef}
-          src={voiceoverUrl}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-          onEnded={() => setPlaying(false)}
-          preload="auto"
-        />
-
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/70 to-transparent p-3">
-          <div className="pointer-events-auto flex items-center gap-3">
-            <Button size="icon" variant="default" className="size-10 rounded-full" onClick={toggle} aria-label={playing ? "Pause" : "Play"}>
-              {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
-            </Button>
-            <div className="flex-1 font-mono text-xs tabular-nums text-white/90">
-              {formatDuration(currentMs)} <span className="text-white/50">/ {formatDuration(totalDurationMs)}</span>
+        {/* Re-rendering overlay */}
+        {!showEmptyState && isRendering && (
+          <div className="absolute inset-0 z-20 grid place-items-center bg-black/60 backdrop-blur-sm">
+            <div className="flex items-center gap-2 rounded-full bg-background/80 px-4 py-2 text-sm">
+              <Loader2 className="size-4 animate-spin" /> Rendering preview…
             </div>
           </div>
-        </div>
+        )}
+
+        {/* Bottom overlay: play/pause + time + re-render button */}
+        {!showEmptyState && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/70 to-transparent p-3">
+            <div className="pointer-events-auto flex items-center gap-3">
+              <Button
+                size="icon"
+                variant="default"
+                className="size-10 rounded-full"
+                onClick={toggle}
+                aria-label={playing ? "Pause" : "Play"}
+                disabled={isRendering}
+              >
+                {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
+              </Button>
+              <div className="flex-1 font-mono text-xs tabular-nums text-white/90">
+                {formatDuration(currentMs)}{" "}
+                <span className="text-white/50">/ {formatDuration(totalDurationMs)}</span>
+              </div>
+              {isStale && (
+                <Button
+                  size="sm"
+                  variant="default"
+                  onClick={onRequestRerender}
+                  disabled={isRendering}
+                  className="gap-1.5"
+                >
+                  <RefreshCw className="size-3.5" /> Re-render
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

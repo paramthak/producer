@@ -1,54 +1,82 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { paths, readJson } from "@/lib/session";
 import { loadManifest } from "@/lib/manifest";
-import { renderFinalMp4, type RenderSegment } from "@/lib/ffmpeg";
+import { hashPlan } from "@/lib/planHash";
 import { nodeStreamToWebStream } from "@/lib/streamHelpers";
 import type { EditPlan } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 600;
 
+/**
+ * Cache passthrough.
+ *
+ * The pipeline's render phase (and the /api/render endpoint) writes a
+ * preview MP4 named preview-<planHash>.mp4 and stores the metadata on
+ * manifest.preview. This route just streams that file — no rendering
+ * happens here anymore.
+ *
+ * If the cached planHash doesn't match the current edit plan's hash, the
+ * cached MP4 is stale (user edited the plan since the last render). We
+ * return 409 with structured error so the frontend can prompt the user
+ * to click "Re-render preview" before downloading.
+ */
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as { sessionId: string };
-  if (!body.sessionId) return new Response(JSON.stringify({ error: "Missing sessionId" }), { status: 400 });
+  if (!body.sessionId) {
+    return new Response(JSON.stringify({ error: "Missing sessionId" }), { status: 400 });
+  }
 
   const m = await loadManifest(body.sessionId);
   const p = paths(body.sessionId);
   const plan = await readJson<EditPlan>(p.editPlan);
-  if (!m || !plan || !m.voiceover) {
+  if (!m || !plan) {
     return new Response(JSON.stringify({ error: "Edit plan not ready" }), { status: 400 });
   }
 
-  const clipsById = Object.fromEntries(m.clips.map((c) => [c.id, c]));
+  if (!m.preview) {
+    return new Response(
+      JSON.stringify({
+        error: "Preview not rendered yet. Click Re-render in the editor first.",
+        stale: true,
+        cachedHash: null,
+        currentHash: hashPlan(plan),
+      }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    );
+  }
 
-  const segments: RenderSegment[] = plan.segments
-    .map((seg) => {
-      const clip = clipsById[seg.clipId];
-      if (!clip) return null;
-      const dur = (seg.timelineEndMs - seg.timelineStartMs) / 1000;
-      if (dur <= 0) return null;
-      return {
-        inputPath: path.join(p.base, clip.relPath),
-        isImage: clip.kind === "image",
-        startSec: clip.kind === "image" ? 0 : seg.sourceInMs / 1000,
-        durationSec: dur,
-      };
-    })
-    .filter((x): x is RenderSegment => !!x);
+  const currentHash = hashPlan(plan);
+  if (m.preview.planHash !== currentHash) {
+    return new Response(
+      JSON.stringify({
+        error: "Preview is stale (plan changed since last render). Click Re-render in the editor.",
+        stale: true,
+        cachedHash: m.preview.planHash,
+        currentHash,
+      }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    );
+  }
 
-  if (!segments.length) return new Response(JSON.stringify({ error: "No segments to render" }), { status: 400 });
+  const outPath = path.join(p.output, m.preview.filename);
+  let stats;
+  try {
+    stats = await stat(outPath);
+  } catch {
+    return new Response(
+      JSON.stringify({
+        error: "Cached preview file missing. Click Re-render in the editor.",
+        stale: true,
+        cachedHash: m.preview.planHash,
+        currentHash,
+      }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    );
+  }
 
-  const outPath = path.join(p.output, `producer-${body.sessionId.slice(0, 6)}.mp4`);
-  await renderFinalMp4({
-    segments,
-    voiceoverPath: path.join(p.base, m.voiceover.relPath),
-    outPath,
-  });
-
-  const stats = await stat(outPath);
   const stream = createReadStream(outPath);
   return new Response(nodeStreamToWebStream(stream, req.signal), {
     headers: {

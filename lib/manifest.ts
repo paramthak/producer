@@ -10,6 +10,17 @@ export interface SessionManifest {
   voiceover: { filename: string; relPath: string; url: string; sizeBytes: number } | null;
   script: ScriptLine[];
   overridePrompt: string;
+  /**
+   * The most recently rendered preview MP4 for this session, if any.
+   * `planHash` is computed by hashPlan() at render time; the frontend
+   * compares it to the current EditPlan's hash to know whether the
+   * render is stale (user edited the plan since render).
+   */
+  preview?: {
+    filename: string;
+    planHash: string;
+    renderedAt: number;
+  };
 }
 
 export async function loadManifest(sessionId: string): Promise<SessionManifest | null> {

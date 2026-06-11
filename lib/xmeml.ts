@@ -95,6 +95,20 @@ export function buildXmeml(opts: {
   clipAbsPath: Record<string, string>;
   voiceoverAbsPath: string;
   voiceoverDurationMs: number;
+  /**
+   * Optional clipId → display name override. When provided, becomes the
+   * value used for both <name> (Premiere bin label) AND the basename of
+   * <pathurl>. The default falls back to clip.filename (original upload
+   * name). The ZIP bundle export uses this to apply collision-disambiguated
+   * names that match the ZIP's file structure for one-click relink.
+   */
+  clipNames?: Record<string, string>;
+  /**
+   * Optional override for the voiceover's display name. Defaults to the
+   * original uploaded voiceover filename (from manifest.voiceover.filename
+   * if the caller passes it through clip.filename style).
+   */
+  voiceoverName?: string;
 }): string {
   const {
     projectName,
@@ -103,6 +117,8 @@ export function buildXmeml(opts: {
     clipAbsPath,
     voiceoverAbsPath,
     voiceoverDurationMs,
+    clipNames,
+    voiceoverName,
   } = opts;
 
   // Resolve unique source files (one <file> def per clipId, reused by id).
@@ -176,12 +192,18 @@ ${extraIndent}</file>`;
     const fileId = fileIdByClip.get(seg.clipId)!;
     const isImage = clip.kind === "image";
 
-    // The on-disk basename includes our upload-side prefix (e.g.
-    // "abc123_Master_s_Footage.mp4"). Premiere's relink-by-name prompts
-    // use this basename — making <name> match the actual file on disk
-    // means a user who downloads the source clips to any folder can
-    // point Premiere at one and the rest get found automatically.
-    const storedBasename = path.basename(abs);
+    // Display name in the NLE bin AND the basename inside <pathurl>. When the
+    // ZIP bundle export passes a disambiguated clipNames map, use it — the
+    // names match the actual files inside the ZIP so Premiere's relink-by-
+    // name finds everything automatically. Otherwise fall back to the
+    // user's original filename (clip.filename) which is the clean form
+    // they uploaded as.
+    const displayName = clipNames?.[clip.id] ?? clip.filename;
+    // <pathurl> uses the parent dir of the actual on-disk file but with
+    // displayName as the basename — this is what Premiere shows in the
+    // relink dialog and what it tries to match against files in any folder.
+    const pathBasenameDir = path.dirname(abs);
+    const pathForUrl = path.join(pathBasenameDir, displayName);
 
     const sourceTotalFrames = isImage
       ? IMAGE_SOURCE_FRAMES
@@ -194,8 +216,8 @@ ${extraIndent}</file>`;
 
     const fileEl = buildFileElement(
       fileId,
-      storedBasename,
-      fileUrl(abs),
+      displayName,
+      fileUrl(pathForUrl),
       sourceTotalFrames,
       isImage,
       true, // has video
@@ -205,7 +227,7 @@ ${extraIndent}</file>`;
 
     videoClipitems.push(
       `        <clipitem id="ci-v-${i + 1}">
-          <name>${xmlEscape(storedBasename)}</name>
+          <name>${xmlEscape(displayName)}</name>
           <enabled>TRUE</enabled>
           <duration>${sourceTotalFrames}</duration>
 ${RATE.split("\n").map((l) => "    " + l).join("\n")}
@@ -219,15 +241,18 @@ ${fileEl}
   });
 
   // ---- Voiceover on the audio track ----
-  // Same on-disk-basename rule as clips: match what the user has on their
-  // machine after download so Premiere's relink-by-name lands cleanly.
-  const voStoredBasename = path.basename(voiceoverAbsPath);
+  // Same display-name logic as clips: the ZIP bundle passes a clean
+  // voiceoverName matching its ZIP entry; otherwise default to the
+  // on-disk basename.
+  const voDisplayName = voiceoverName ?? path.basename(voiceoverAbsPath);
+  const voPathDir = path.dirname(voiceoverAbsPath);
+  const voPathForUrl = path.join(voPathDir, voDisplayName);
   const voFileId = "file-vo";
   const voDurationFrames = Math.max(1, msToFrames(voiceoverDurationMs));
   const voFileEl = buildFileElement(
     voFileId,
-    voStoredBasename,
-    fileUrl(voiceoverAbsPath),
+    voDisplayName,
+    fileUrl(voPathForUrl),
     voDurationFrames,
     false,
     false,
@@ -235,7 +260,7 @@ ${fileEl}
     "          ",
   );
   const voClipitem = `        <clipitem id="ci-a-1">
-          <name>${xmlEscape(voStoredBasename)}</name>
+          <name>${xmlEscape(voDisplayName)}</name>
           <enabled>TRUE</enabled>
           <duration>${voDurationFrames}</duration>
 ${RATE.split("\n").map((l) => "    " + l).join("\n")}
