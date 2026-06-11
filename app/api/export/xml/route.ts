@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import path from "node:path";
 import { paths, readJson } from "@/lib/session";
-import { loadManifest } from "@/lib/manifest";
+import { loadManifestWithAudioInfo } from "@/lib/audioProbe";
 import { buildXmeml } from "@/lib/xmeml";
 import { disambiguateNames } from "@/lib/zipBundle";
 import type { EditPlan, WordTimestamp } from "@/lib/types";
@@ -29,7 +29,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
   }
 
-  const m = await loadManifest(body.sessionId);
+  // loadManifestWithAudioInfo back-fills clip.hasAudio for any clips that
+  // were uploaded before we started capturing audio-stream presence —
+  // critical for Premiere's relink-by-name not to fail with "type does
+  // not match" on video-only stock footage.
+  const m = await loadManifestWithAudioInfo(body.sessionId);
   const p = paths(body.sessionId);
   const plan = await readJson<EditPlan>(p.editPlan);
   const alignment = await readJson<{ words: WordTimestamp[]; durationMs: number }>(p.alignment);

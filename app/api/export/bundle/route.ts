@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { paths, readJson } from "@/lib/session";
-import { loadManifest } from "@/lib/manifest";
+import { loadManifestWithAudioInfo } from "@/lib/audioProbe";
 import { buildBundleZip } from "@/lib/zipBundle";
 import { nodeStreamToWebStream } from "@/lib/streamHelpers";
 import type { EditPlan, WordTimestamp } from "@/lib/types";
@@ -25,7 +25,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
   }
 
-  const m = await loadManifest(body.sessionId);
+  // Back-fill clip.hasAudio for legacy uploads so the in-ZIP XMEML
+  // declares track presence honestly (otherwise Premiere refuses to
+  // link the relocated files).
+  const m = await loadManifestWithAudioInfo(body.sessionId);
   const p = paths(body.sessionId);
   const plan = await readJson<EditPlan>(p.editPlan);
   const alignment = await readJson<{ words: WordTimestamp[]; durationMs: number }>(p.alignment);

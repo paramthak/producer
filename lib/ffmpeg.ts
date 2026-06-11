@@ -10,6 +10,15 @@ export interface ProbeResult {
   width?: number;
   height?: number;
   fps?: number;
+  /**
+   * True iff the file contains at least one audio stream. Critical for
+   * XMEML export — Premiere's relink-by-name refuses to link a file whose
+   * track configuration (audio yes/no) doesn't match what the project
+   * file declares. Stock-footage MP4s are often video-only; if we tell
+   * Premiere they have audio when they don't, the relink dialog throws
+   * "Cannot Link Media — type does not match" and refuses.
+   */
+  hasAudio: boolean;
 }
 
 export async function probe(file: string): Promise<ProbeResult> {
@@ -24,9 +33,9 @@ export async function probe(file: string): Promise<ProbeResult> {
   ];
   const out = await runStdout(FFPROBE, args);
   const json = JSON.parse(out);
-  const video = (json.streams as Array<Record<string, unknown>> | undefined)?.find(
-    (s) => s.codec_type === "video",
-  );
+  const streams = (json.streams as Array<Record<string, unknown>> | undefined) ?? [];
+  const video = streams.find((s) => s.codec_type === "video");
+  const hasAudio = streams.some((s) => s.codec_type === "audio");
   const durationSec = Number(json.format?.duration ?? video?.duration ?? 0);
   let fps: number | undefined;
   if (video?.avg_frame_rate && typeof video.avg_frame_rate === "string") {
@@ -38,6 +47,7 @@ export async function probe(file: string): Promise<ProbeResult> {
     width: video?.width as number | undefined,
     height: video?.height as number | undefined,
     fps,
+    hasAudio,
   };
 }
 

@@ -205,6 +205,15 @@ ${extraIndent}</file>`;
     const pathBasenameDir = path.dirname(abs);
     const pathForUrl = path.join(pathBasenameDir, displayName);
 
+    // Track-presence MUST match the actual source file. If we declare
+    // <audio> for a video-only stock clip, Premiere's relink-by-name
+    // rejects the file with "type does not match". Use the probed value
+    // from upload; fall back conservatively to false (video-only) for
+    // legacy manifest entries lacking the field — a clip that's actually
+    // video-only and declared video-only is the safer mismatch than the
+    // reverse.
+    const hasAudio = !isImage && (clip.hasAudio ?? false);
+
     const sourceTotalFrames = isImage
       ? IMAGE_SOURCE_FRAMES
       : Math.max(1, msToFrames(clip.durationMs));
@@ -221,7 +230,7 @@ ${extraIndent}</file>`;
       sourceTotalFrames,
       isImage,
       true, // has video
-      !isImage, // has audio (only real video clips; we ignore source audio in render but Premiere needs the metadata)
+      hasAudio, // honest declaration — see comment above
       "          ",
     );
 

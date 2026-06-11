@@ -38,6 +38,15 @@ export interface SourceClip {
   height?: number;
   fps?: number;
   sizeBytes: number;
+  /**
+   * True iff the source file actually contains an audio stream. Optional
+   * for back-compat with manifests written before this field existed —
+   * downstream consumers fall back to a defensive default (or re-probe
+   * on the fly) when it's undefined. Required by the XMEML exporter so
+   * Premiere's relink-by-name doesn't reject the file with a "type does
+   * not match" error.
+   */
+  hasAudio?: boolean;
 }
 
 export interface ScriptLine {

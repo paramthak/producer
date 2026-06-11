@@ -208,6 +208,10 @@ export async function POST(req: NextRequest) {
   let width: number | undefined;
   let height: number | undefined;
   let fps: number | undefined;
+  // Default for images and unprobed video files: no audio. Stock video
+  // footage frequently has no audio track and Premiere refuses to relink
+  // a file claiming audio against a file with no audio stream.
+  let hasAudio = false;
   if (clipKind === "video") {
     try {
       const probed = await probe(abs);
@@ -215,6 +219,7 @@ export async function POST(req: NextRequest) {
       width = probed.width;
       height = probed.height;
       fps = probed.fps;
+      hasAudio = probed.hasAudio;
     } catch {
       /* best effort */
     }
@@ -232,6 +237,7 @@ export async function POST(req: NextRequest) {
     height,
     fps,
     sizeBytes: stats.size,
+    hasAudio,
   };
   manifest.clips.push(clip);
   await saveManifest(manifest);
