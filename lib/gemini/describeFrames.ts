@@ -116,14 +116,26 @@ export async function describeClip(input: DescribeInput, signal?: AbortSignal): 
     description: f.description ?? "",
   }));
 
+  // Same diagnostic-with-fallback pattern as matchAndTrim. Image-token
+  // estimate is roughly the published Gemini vision rate: ~258 tokens per
+  // image at LOW media resolution, ~1024 at HIGH. Add the small text
+  // prompt overhead. The fallback only fires when the SDK refuses to
+  // report tokens — otherwise we use the real number.
+  const usageMetadata = (result as unknown as {
+    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  }).usageMetadata;
+  const reportedIn = usageMetadata?.promptTokenCount;
+  const reportedOut = usageMetadata?.candidatesTokenCount;
+  const tokensPerImage = input.highRes ? 1024 : 258;
+  const estimatedIn = input.framePaths.length * tokensPerImage + 200; // +200 for the instruction text
+  const estimatedOut = Math.ceil((result.text ?? "").length / 4);
   const usage: DescribeUsage = {
-    inputTokens:
-      (result as unknown as { usageMetadata?: { promptTokenCount?: number } })
-        .usageMetadata?.promptTokenCount ?? 0,
-    outputTokens:
-      (result as unknown as { usageMetadata?: { candidatesTokenCount?: number } })
-        .usageMetadata?.candidatesTokenCount ?? 0,
+    inputTokens: typeof reportedIn === "number" && reportedIn > 0 ? reportedIn : estimatedIn,
+    outputTokens: typeof reportedOut === "number" && reportedOut > 0 ? reportedOut : estimatedOut,
   };
+  console.log(
+    `[gemini-describe clip=${input.clipId} frames=${input.framePaths.length} highRes=${input.highRes}] usageMetadata=${JSON.stringify(usageMetadata)} | reported in/out=${reportedIn ?? "MISSING"}/${reportedOut ?? "MISSING"} | estimated in/out=${estimatedIn}/${estimatedOut} | using in/out=${usage.inputTokens}/${usage.outputTokens}`,
+  );
 
   return {
     analysis: {

@@ -9,6 +9,7 @@ import type {
   SectionId,
   SectionWindow,
   SourceClip,
+  WordTimestamp,
 } from "@/lib/types";
 import { SECTION_LABEL } from "@/lib/types";
 
@@ -17,6 +18,14 @@ export interface MatchInput {
   clips: SourceClip[];
   analyses: Record<string, ClipAnalysis>;
   overridePrompt: string;
+  /**
+   * The full per-word forced-alignment output from ElevenLabs. Threaded
+   * into the match prompt per-section so Gemini sees the EXACT speech
+   * rhythm — when words race vs. linger — instead of guessing from
+   * per-line aggregate timestamps. This is what stops product clips
+   * from bleeding into outro and lets fast utterances get fast cuts.
+   */
+  words: WordTimestamp[];
 }
 
 const responseSchema = {
@@ -66,12 +75,13 @@ export interface MatchResult {
 }
 
 export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Promise<MatchResult> {
-  const { windows, clips, analyses, overridePrompt } = input;
+  const { windows, clips, analyses, overridePrompt, words } = input;
 
   // Build the structured prompt: section windows + per-section candidate clips with descriptions.
-  // Per-line spoken timings are passed so the model can tell exactly when speech happens vs.
-  // silence within the window — useful for picking establishing/breathing visuals during the
-  // silent lead-in of a section.
+  // Per-line spoken timings AND the raw per-word forced-alignment array per section are both
+  // included so Gemini reads the exact speech rhythm (fast utterances vs. lingering phrases)
+  // instead of guessing from line aggregates. This is what enables cut rhythm to follow voice
+  // rhythm and keeps section boundaries honest (product clips stop bleeding into outro).
   const sections = windows.map((w) => {
     const candidates = clips
       .filter((c) => c.section === w.section)
@@ -87,6 +97,10 @@ export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Pro
         };
       });
     const timings = w.lineTimings ?? {};
+    // Words spoken inside this section's time window (inclusive of edges).
+    const sectionWords = words
+      .filter((wd) => wd.startMs >= w.startMs && wd.endMs <= w.endMs)
+      .map((wd) => ({ text: wd.text, startMs: wd.startMs, endMs: wd.endMs }));
     return {
       section: w.section,
       label: SECTION_LABEL[w.section],
@@ -99,6 +113,7 @@ export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Pro
           ? { id: l.id, text: l.text, spokenStartMs: t.startMs, spokenEndMs: t.endMs }
           : { id: l.id, text: l.text };
       }),
+      words: sectionWords,
       candidates,
     };
   });
@@ -107,19 +122,19 @@ export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Pro
     "You are an expert short-form video editor. Build the edit plan for a 9:16 vertical reel.",
     "",
     "RULES:",
-    "1. The voiceover is the master clock. Every segment's timelineStartMs/timelineEndMs must fit inside its section's window.",
+    "1. The voiceover is the master clock. Every segment's timelineStartMs/timelineEndMs MUST fit inside its section's window (between the window's startMs and endMs). NEVER let a segment cross into the next section's window — if outro starts at 12000ms, the body section's last segment must end at or before 12000ms.",
     "2. For each section, pick the candidate clip(s) whose visuals best match the script lines in that section.",
     "3. Trim each video clip to the MEANINGFUL portion (sourceInMs..sourceOutMs). Cut dead time, glances, redundant motion.",
     "4. Images (kind='image') always have sourceInMs=0 and sourceOutMs=timelineEndMs-timelineStartMs.",
     "5. A clip's trim duration (sourceOutMs - sourceInMs) MUST equal its timeline duration (timelineEndMs - timelineStartMs).",
-    "6. Fill the ENTIRE section window with cuts. If a single best clip is shorter than the section, slice it into multiple segments rather than holding one frame. Aim for 2-5 segments per section when material allows. A 9:16 reel feels alive when cuts land every 2-4 seconds.",
-    "6a. Section windows may include silent lead-in or trail-out periods where no line is spoken (compare the window's startMs/endMs against each line's spokenStartMs/spokenEndMs). Use those silent moments for establishing shots, atmospheric beats, or breathing room — the visual sets up before the voiceover lands, or lingers after the last word. Don't waste silent time with a frozen frame; pick a visual that complements the upcoming/preceding speech.",
-    "6b. HOOK section pacing is special — it must be punchy. Target 3-6 segments in a 4-5 second hook, each 1.0 to 1.5 seconds long. Every cut must show a visually distinct moment — different subject, framing, or action, derived from the frame descriptions. When one candidate clip's frames describe multiple distinct beats (e.g. walking shot at 0ms, bus passes at 1500ms, monument at 3000ms), slice ACROSS those beats rather than picking one continuous excerpt. A held single shot is the opposite of a hook. The CTA section can use the same aggressive pacing when energy is wanted at the end; body, bridge, and outro stay at the 2-4 second cadence. NEVER exceed 6 segments in the hook.",
-    "7. You MAY reuse the same clipId across multiple segments. This is the right move when a section only has one strong clip but its source is longer than any single beat — pick distinct 2-4 second slices from different non-overlapping time ranges (different action, framing, or moment in the clip). Diversity makes the edit feel cut, not held.",
-    "8. When two or more segments share a clipId, their source ranges (sourceInMs..sourceOutMs) MUST NOT OVERLAP. Time-disjoint slices only — segment A using 0-3000ms and segment B using 5000-8000ms is fine; A=0-3000 and B=2000-5000 is forbidden.",
-    "9. Respect the override prompt if provided. It overrides default choices.",
-    "10. Return segments in order from t=0 onward, no overlaps, no gaps.",
-    "11. Provide a one-sentence whyClip (why this clip fits this script line) and whyTrim (why this in/out point).",
+    "6. Cut rhythm MUST follow voiceover rhythm. Read the `words` array provided for each section — each entry has the word's text plus its startMs/endMs. When the speaker races through short words in rapid succession (e.g. acronyms, lists like 'SOP, LOR, passport, visa' where each word is under 500ms), cut at that pace, ideally one visual per word or per tight group. When the speaker sustains a longer phrase, hold the visual for that phrase's duration. There is NO fixed cadence target — let the speech drive it. HARD FLOOR: no segment shorter than 400ms (anything tighter feels like a jitter, not a cut).",
+    "6a. Section windows may include silent lead-in or trail-out periods where no word is spoken. Use those silent moments for establishing shots, atmospheric beats, or breathing room — the visual sets up before the voiceover lands, or lingers after the last word. Don't waste silent time with a frozen frame.",
+    "7. HOOK SECTION special rules: (a) Each segment in the hook MUST come from a DIFFERENT clipId. You may NOT reuse the same clip across two hook segments — slicing one hook clip into multiple pieces is forbidden. If only ONE candidate clip is available for the hook, the hook gets exactly ONE segment from that clip. (b) For each hook clip you do use, pick the punchiest, most kinetic frames — motion, surprise, energy, visual impact. The hook is the visual hook; lean into momentum. Skip slow lead-ins, static shots, or low-energy moments inside the clip.",
+    "8. Outside the hook, you MAY reuse the same clipId across multiple segments when a section only has one strong clip but its source is longer than any single beat — pick distinct slices from different non-overlapping time ranges (different action, framing, or moment in the clip).",
+    "9. When two or more segments share a clipId, their source ranges (sourceInMs..sourceOutMs) MUST NOT OVERLAP. Time-disjoint slices only — segment A using 0-3000ms and segment B using 5000-8000ms is fine; A=0-3000 and B=2000-5000 is forbidden.",
+    "10. Respect the override prompt if provided. It overrides default choices.",
+    "11. Return segments in order from t=0 onward, no overlaps between segments, no gaps within a section window.",
+    "12. Provide a one-sentence whyClip (why this clip fits this script line) and whyTrim (why this in/out point).",
     "",
     overridePrompt.trim() ? `OVERRIDE PROMPT: ${overridePrompt.trim()}` : "OVERRIDE PROMPT: (none — you decide)",
     "",
@@ -168,14 +183,26 @@ export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Pro
     ? windows[windows.length - 1].endMs
     : segments.reduce((m, s) => Math.max(m, s.timelineEndMs), 0);
 
+  // SDK *should* return usageMetadata on every generateContent response,
+  // but we've seen the cost chip stick at $0 across three devices — so
+  // log unconditionally on every call until we have proof one way or the
+  // other. When the SDK does NOT report tokens, fall back to a char-count
+  // estimate (~4 chars/token for English text) so the chip displays
+  // something approximately right instead of zero.
+  const usageMetadata = (result as unknown as {
+    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  }).usageMetadata;
+  const reportedIn = usageMetadata?.promptTokenCount;
+  const reportedOut = usageMetadata?.candidatesTokenCount;
+  const estimatedIn = Math.ceil(prompt.length / 4);
+  const estimatedOut = Math.ceil(text.length / 4);
   const usage: MatchUsage = {
-    inputTokens:
-      (result as unknown as { usageMetadata?: { promptTokenCount?: number } })
-        .usageMetadata?.promptTokenCount ?? 0,
-    outputTokens:
-      (result as unknown as { usageMetadata?: { candidatesTokenCount?: number } })
-        .usageMetadata?.candidatesTokenCount ?? 0,
+    inputTokens: typeof reportedIn === "number" && reportedIn > 0 ? reportedIn : estimatedIn,
+    outputTokens: typeof reportedOut === "number" && reportedOut > 0 ? reportedOut : estimatedOut,
   };
+  console.log(
+    `[gemini-match] usageMetadata=${JSON.stringify(usageMetadata)} | reported in/out=${reportedIn ?? "MISSING"}/${reportedOut ?? "MISSING"} | estimated in/out=${estimatedIn}/${estimatedOut} | using in/out=${usage.inputTokens}/${usage.outputTokens}`,
+  );
 
   return {
     plan: { segments, totalDurationMs: total },

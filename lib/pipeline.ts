@@ -225,6 +225,10 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
         clips: manifest.clips,
         analyses,
         overridePrompt: opts.overridePrompt ?? manifest.overridePrompt ?? "",
+        // Per-word forced-alignment timing — Gemini reads speech rhythm
+        // directly and matches cut pace to it (fixes the "SOP/LOR shown
+        // for full second" issue and the section-bleed problem).
+        words,
       },
       sigGetter(),
     );
@@ -322,8 +326,13 @@ export async function renderPreviewForSession(opts: {
   });
 
   // Persist on the manifest so the editor can compare hashes for staleness.
+  // CRITICAL: re-read the manifest from disk before merging — earlier phases
+  // (analyse, align, match) write per-call API costs to the manifest via
+  // updateSessionCosts(). If we spread the stale in-memory `manifest` here,
+  // we'd overwrite those cost writes and the UI would forever show $0.00.
+  const onDisk = (await loadManifest(sessionId)) ?? manifest;
   const updated: SessionManifest = {
-    ...manifest,
+    ...onDisk,
     preview: { filename, planHash, renderedAt: Date.now() },
   };
   await saveManifest(updated);
