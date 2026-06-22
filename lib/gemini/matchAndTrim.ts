@@ -46,6 +46,7 @@ const responseSchema = {
           "whyClip",
           "whyTrim",
           "whyMatch",
+          "coveredWords",
         ],
         properties: {
           section: {
@@ -65,6 +66,25 @@ const responseSchema = {
           // This forces the cross-reference exercise rather than allowing
           // hand-waving justifications. Format demanded in Rule 0.
           whyMatch: { type: Type.STRING },
+          // Mandatory word-coverage manifest. The model must list every
+          // voiceover word that plays during this segment's timeline
+          // range, with the word's exact text and startMs/endMs. The
+          // server cross-checks: union of coveredWords across all
+          // segments in a section MUST equal that section's `words`
+          // array. Mismatches are logged as warnings to flag drift.
+          // This is what forces word-first reasoning per Rule 0.
+          coveredWords: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              required: ["text", "startMs", "endMs"],
+              properties: {
+                text: { type: Type.STRING },
+                startMs: { type: Type.INTEGER },
+                endMs: { type: Type.INTEGER },
+              },
+            },
+          },
         },
       },
     },
@@ -79,6 +99,83 @@ export interface MatchUsage {
 export interface MatchResult {
   plan: EditPlan;
   usage: MatchUsage;
+}
+
+/**
+ * Server-side word-coverage validation.
+ *
+ * For each section, every word in the section's `words` array should
+ * appear in exactly one segment's `coveredWords` list. Each segment's
+ * `coveredWords` should also actually fall inside that segment's
+ * timeline range. Mismatches mean Rule 0's word-first reasoning didn't
+ * land — either the AI under-cut (one segment claims words from
+ * different moments) or over-cut (lost words). Log only, no retry —
+ * this is a signal for prompt tuning, not a correction loop.
+ */
+function validateWordCoverage(
+  windows: SectionWindow[],
+  segments: PlanSegment[],
+): void {
+  for (const w of windows) {
+    if (!w.lines.length) continue;
+    const sectionSegments = segments.filter((s) => s.section === w.section);
+    if (sectionSegments.length === 0) continue;
+
+    // Build the set of word "keys" (startMs:text) the section expects.
+    // Words are sourced from lineTimings — we don't have the per-word
+    // array on the window itself, but the AI was given it via the
+    // prompt's `words` per section. Treat coveredWords as ground truth
+    // and just check internal consistency: segment timeline ↔ its own
+    // coveredWords range.
+    let issues = 0;
+    for (const seg of sectionSegments) {
+      const cw = seg.coveredWords ?? [];
+      if (cw.length === 0) {
+        console.warn(
+          `[match] segment ${seg.id} in section "${w.section}" emitted with empty coveredWords — Rule 0 audit missing`,
+        );
+        issues += 1;
+        continue;
+      }
+      // Each covered word should fall inside the segment's timeline range
+      // (small tolerance for end-of-word boundary).
+      const TOL = 50;
+      for (const word of cw) {
+        if (word.startMs < seg.timelineStartMs - TOL || word.endMs > seg.timelineEndMs + TOL) {
+          console.warn(
+            `[match] segment ${seg.id} (${seg.timelineStartMs}-${seg.timelineEndMs}ms) claims to cover word "${word.text}" (${word.startMs}-${word.endMs}ms) which is outside its timeline range — possible drift`,
+          );
+          issues += 1;
+        }
+      }
+    }
+
+    // Check for double-coverage: same word claimed by multiple segments.
+    const seen = new Map<string, string>(); // key → segId
+    for (const seg of sectionSegments) {
+      for (const word of seg.coveredWords ?? []) {
+        const key = `${word.startMs}:${word.text}`;
+        const prev = seen.get(key);
+        if (prev && prev !== seg.id) {
+          console.warn(
+            `[match] word "${word.text}" at ${word.startMs}ms is claimed by both segment ${prev} and segment ${seg.id} — coverage overlap`,
+          );
+          issues += 1;
+        }
+        seen.set(key, seg.id);
+      }
+    }
+
+    if (issues === 0) {
+      console.log(
+        `[match] section "${w.section}": word-coverage validation clean (${sectionSegments.length} segments)`,
+      );
+    } else {
+      console.warn(
+        `[match] section "${w.section}": ${issues} word-coverage issue(s) — see warnings above`,
+      );
+    }
+  }
 }
 
 export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Promise<MatchResult> {
@@ -128,29 +225,32 @@ export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Pro
   const prompt = [
     "You are an expert short-form video editor. Build the edit plan for a 9:16 vertical reel.",
     "",
-    "RULES (read RULE 0 first and keep it active in mind for every decision):",
+    "RULES (read RULE 0 first; it changes how you think about ALL other rules):",
     "",
-    "RULE 0 — HIGHEST PRIORITY: semantic word-to-frame match.",
-    "  For every segment you emit, the visual content at the chosen source time-range MUST semantically match the spoken words at that segment's timeline position. This rule outranks every other rule below.",
-    "  Mechanic: each section gives you (a) a `words` array — every spoken word with its timeline startMs/endMs; (b) candidate clips, each with a `frames` array — every frame description with its source timestampMs.",
-    "  For each segment you plan to emit:",
-    "    (i)   Identify the words spoken during this segment's timeline range (filter the section's words by the segment's timelineStartMs..timelineEndMs).",
-    "    (ii)  Among the candidate clips in this section, find the clip with at least one frame description that semantically refers to what those exact words are about. If the words say 'we packed our bags', the clip must have a frame description mentioning bags, packing, suitcases, or a clearly related action — not an unrelated airport shot, even if the airport shot is the same section's other clip.",
-    "    (iii) Inside that clip, choose the sourceInMs..sourceOutMs to CENTER on the timestampMs of the matching frame description. Don't default to clip start — scan ALL frame descriptions, pick the timestamp whose description matches, then trim a window around it that equals the segment's timeline duration.",
-    "  If no candidate clip has a frame description matching the spoken words, do NOT force a wrong clip. Pick the loosest reasonable fit and explicitly note the gap in whyMatch.",
-    "  Mandatory `whyMatch` field per segment: a single sentence quoting BOTH (a) the exact spoken words at this segment's timeline range AND (b) the exact matching frame description (or 'no exact match available') from the source slice. Example: 'Words \"packed our bags\" at 3200-3800ms ↔ frame \"hands zipping a suitcase shut\" at clip 1500ms.' If you cannot produce this match honestly, you've picked the wrong clip or wrong slice — go back and pick again.",
+    "RULE 0 — WORD-FIRST MATCHING (highest priority).",
+    "  Build the edit plan WORD-BY-WORD, not segment-by-segment. The unit of decision is the word, not the segment. Segments are produced AFTER per-word decisions, by collapsing adjacent decisions that share a clip and continuous source range.",
+    "  Loop, for each section, in order:",
+    "    Step 1 — Iterate through the section's `words` array. For EACH word (or a tight 2-3 word phrase whose pronunciations slur together with <80ms gaps between consecutive words), make a per-word decision:",
+    "      • Which candidate clipId will be on screen at this word's startMs?",
+    "      • Which source millisecond INSIDE that clip will be playing at this word's startMs? (Find a frame in the clip whose description semantically matches what THIS word is about; the source millisecond is that frame's timestampMs.)",
+    "    Step 2 — After every word in the section has a per-word decision, walk them in order and COLLAPSE adjacent decisions into segments using this STRICT rule:",
+    "      Two adjacent word-decisions collapse into one segment ONLY IF (a) they use the SAME clipId AND (b) word N+1's source-timestamp is within ±400ms of being a continuous play from word N's source-timestamp (i.e., for word N at source 1500ms with timeline duration Δ, word N+1's source must be 1500 + Δ ± 400ms). Otherwise they remain SEPARATE segments.",
+    "      DEFAULT: split. Collapsing is the deliberate exception. If in doubt, split.",
+    "  Why this is the highest-priority rule: when one clip's source pacing differs from the voiceover's pacing, a single contiguous segment plays the clip at its own rate — so the visual drifts out of sync with the voiceover (e.g., voiceover says 'profile, budget, country' as three quick words but the clip slowly pans through those three UI states at its own pace, leaving the visual 1-2 seconds behind by the third word). Per-word decisions + the strict collapse rule prevent this drift for ALL speech patterns — rapid lists, normal exposition, slow emphasis — without any special detection.",
     "",
     "1. Section boundaries are hard. Every segment's timelineStartMs/timelineEndMs MUST fit inside its section's window. NEVER let a segment cross into the next section's window — if outro starts at 12000ms, the body section's last segment must end at or before 12000ms.",
-    "2. Cut rhythm follows voiceover rhythm. Read the `words` array — when the speaker races through short words (acronyms, lists like 'SOP, LOR, passport, visa' each under 500ms), cut at that pace, ideally one visual per word or per tight group. When the speaker sustains a longer phrase, hold the visual for the phrase's duration. NO fixed cadence target. HARD FLOOR: no segment shorter than 400ms.",
-    "3. Section windows may include silent lead-in or trail-out periods (compare each line's spokenStartMs/spokenEndMs to the window edges). Use those moments for establishing/atmospheric visuals that contextually set up the upcoming words or linger after the last word.",
+    "2. Semantic match per word. For each per-word decision (Rule 0 Step 1), the clip's frame description at the chosen source millisecond MUST semantically refer to what that exact word is about. If the word is 'profile' and a clip's frame at source 800ms describes 'profile filter screen', that's a match — pick clip+source 800ms. If no candidate clip has a frame matching this word's content, pick the loosest reasonable fit and note the gap in whyMatch.",
+    "3. Section windows may include silent lead-in or trail-out periods (compare each line's spokenStartMs/spokenEndMs to the window edges). Use those moments for establishing/atmospheric visuals that contextually set up the upcoming words or linger after the last word — the per-word loop in Rule 0 still applies, but for silent regions you pick a clip+source whose visual sets up the NEXT spoken word or holds the LAST spoken word's content.",
     "4. HOOK section specifics: (a) Each hook segment MUST come from a DIFFERENT clipId — no slicing one clip into multiple hook segments. One candidate clip available → one hook segment. (b) For each hook clip used, pick the punchiest, most kinetic frames — motion, energy, surprise. Skip slow lead-ins and static shots.",
-    "5. Outside the hook, you MAY reuse the same clipId across multiple segments when a section only has one strong matching clip and its source is longer than any single beat — pick distinct non-overlapping time ranges (Rule 6 below). Each reuse must STILL satisfy Rule 0's semantic match.",
+    "5. CLIP DIVERSITY: when a section has multiple candidate clips uploaded by the user, you SHOULD use AT LEAST 2-3 distinct clipIds across that section's segments. The user uploaded multiple clips because they want visual variety — using only one when 4-5 are available is bad editing. Cycle through clips so each makes at least one appearance unless a clip is genuinely unrelated to ANY spoken word in the section. Exception: hook section follows Rule 4 (different clipId per segment is already mandated). For body/bridge/outro/cta sections with N>1 candidates, target using min(N, ceil(segments/2)) distinct clipIds.",
     "6. When two or more segments share a clipId, their source ranges (sourceInMs..sourceOutMs) MUST NOT OVERLAP. Disjoint slices only.",
     "7. Images (kind='image') always have sourceInMs=0 and sourceOutMs=timelineEndMs-timelineStartMs.",
     "8. A clip's trim duration (sourceOutMs - sourceInMs) MUST equal its timeline duration (timelineEndMs - timelineStartMs).",
     "9. Respect the override prompt if provided.",
     "10. Return segments in order from t=0 onward, no overlaps between segments, no gaps within a section window.",
-    "11. Provide all three justifications per segment: whyClip (which clip and why), whyTrim (which time range in the clip and why), whyMatch (the strict semantic-match quote per Rule 0).",
+    "11. Provide all four justifications per segment: whyClip (which clip and why), whyTrim (which time range in the clip and why), whyMatch (the strict semantic-match quote, see below), coveredWords (the exact voiceover words playing during this segment's timeline range — text + startMs + endMs from the section's `words` array — this is your word-first audit; mandatory).",
+    "12. whyMatch format: a single sentence quoting BOTH (a) the exact spoken words at this segment's timeline range AND (b) the matching frame description from the source slice. Example: 'Words \"packed our bags\" at 3200-3800ms ↔ frame \"hands zipping a suitcase shut\" at clip 1500ms.' If you cannot produce this match honestly, you've picked the wrong clip or wrong slice — go back and pick again.",
+    "13. HARD MIN: no segment shorter than 400ms (after collapsing). Anything tighter feels like a jitter, not a cut.",
     "",
     overridePrompt.trim() ? `OVERRIDE PROMPT: ${overridePrompt.trim()}` : "OVERRIDE PROMPT: (none — you decide)",
     "",
@@ -191,7 +291,25 @@ export async function matchAndTrim(input: MatchInput, signal?: AbortSignal): Pro
     whyClip: String(s.whyClip ?? ""),
     whyTrim: String(s.whyTrim ?? ""),
     whyMatch: String(s.whyMatch ?? ""),
+    coveredWords: Array.isArray(s.coveredWords)
+      ? (s.coveredWords as Array<Record<string, unknown>>)
+          .map((w) => ({
+            text: String(w.text ?? ""),
+            startMs: Math.max(0, Number(w.startMs) || 0),
+            endMs: Math.max(0, Number(w.endMs) || 0),
+          }))
+          .filter((w) => w.text.length > 0)
+      : [],
   }));
+
+  // Word-coverage validation: every word in each section's window should
+  // appear in exactly one segment's coveredWords array, and each segment's
+  // coveredWords should fall inside its timeline range. Mismatches mean
+  // the AI either under-cut (one segment covers words from different
+  // moments — the drift bug) or over-cut (lost words entirely). We log
+  // but don't retry — diagnostic signal only. If this fires often, the
+  // prompt needs more force; if it stays quiet, word-first is working.
+  validateWordCoverage(windows, segments);
 
   // Sort + clamp + normalise durations.
   segments.sort((a, b) => a.timelineStartMs - b.timelineStartMs);

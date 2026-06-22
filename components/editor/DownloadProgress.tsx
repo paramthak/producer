@@ -102,20 +102,38 @@ export function DownloadProgress({ state, onCancel, onRetry, onClose }: Props) {
           </div>
         </div>
 
-        {/* Progress bar */}
+        {/* Progress bar with prominent percentage. Starts at 0%, fills to
+            the real byte percentage when a total is known; falls back to
+            a slim shimmer when total is unknown (rather than the old
+            placeholder fill that made the bar look stuck at ~33%). */}
         {(state.stage === "downloading" || state.stage === "saving") && (
           <div className="mt-4">
-            <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div className="mb-1.5 flex items-center justify-between font-mono text-[11px] tabular-nums">
+              <span className="text-muted-foreground">
+                {pct !== null
+                  ? `${formatBytes(state.receivedBytes)} / ${formatBytes(state.totalBytes!)}`
+                  : `${formatBytes(state.receivedBytes)} received`}
+              </span>
+              <span className="font-semibold text-foreground">
+                {state.stage === "saving"
+                  ? "100%"
+                  : pct !== null
+                    ? `${pct}%`
+                    : "…"}
+              </span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
               <div
-                className="h-full bg-accent transition-[width] duration-200"
-                style={{
-                  width:
-                    state.stage === "saving"
-                      ? "100%"
-                      : pct !== null
-                        ? `${pct}%`
-                        : "33%",
-                }}
+                className={
+                  pct !== null
+                    ? "h-full rounded-full bg-accent transition-[width] duration-150"
+                    : "h-full w-1/4 rounded-full bg-accent/60 animate-pulse"
+                }
+                style={
+                  pct !== null
+                    ? { width: state.stage === "saving" ? "100%" : `${pct}%` }
+                    : undefined
+                }
               />
             </div>
           </div>

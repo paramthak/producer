@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { paths, readJson } from "@/lib/session";
 import { loadManifestWithAudioInfo } from "@/lib/audioProbe";
-import { buildBundleZip } from "@/lib/zipBundle";
+import { buildBundleZip, predictBundleSize } from "@/lib/zipBundle";
 import { nodeStreamToWebStream } from "@/lib/streamHelpers";
 import type { EditPlan, WordTimestamp } from "@/lib/types";
 
@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
   }
 
   const sessionShort = body.sessionId.slice(0, 6);
-  const zipStream = buildBundleZip({
+  const bundleOpts = {
     sessionShort,
     projectName: `Producer-${sessionShort}`,
     manifest: m,
@@ -62,13 +62,23 @@ export async function POST(req: NextRequest) {
     voiceoverAbsPath: path.join(p.base, m.voiceover.relPath),
     voiceoverDurationMs: alignment.durationMs,
     previewMp4AbsPath,
-  });
+  };
 
-  return new Response(nodeStreamToWebStream(zipStream, req.signal), {
-    headers: {
-      "content-type": "application/zip",
-      "content-disposition": `attachment; filename="producer-${sessionShort}.zip"`,
-      "cache-control": "no-store",
-    },
-  });
+  // Predict the exact byte length of the streamed ZIP and send it as
+  // Content-Length. Without this header the frontend's progress bar has
+  // no total to divide against and defaults to a placeholder fill.
+  // Store-mode ZIP overhead is deterministic so the prediction is exact.
+  const predictedSize = await predictBundleSize(bundleOpts);
+  const zipStream = buildBundleZip(bundleOpts);
+
+  const headers: Record<string, string> = {
+    "content-type": "application/zip",
+    "content-disposition": `attachment; filename="producer-${sessionShort}.zip"`,
+    "cache-control": "no-store",
+  };
+  if (predictedSize !== null) {
+    headers["content-length"] = String(predictedSize);
+  }
+
+  return new Response(nodeStreamToWebStream(zipStream, req.signal), { headers });
 }

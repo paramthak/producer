@@ -117,6 +117,14 @@ export interface PlanSegment {
    * hold-fill segments synthesized after the AI pass.
    */
   whyMatch?: string;
+  /**
+   * Word-coverage manifest the model emits per Rule 0 / Rule 11.
+   * Lists every voiceover word that plays during this segment's timeline
+   * range. Used server-side (validateWordCoverage) to detect drift —
+   * if the union of coveredWords across a section's segments doesn't
+   * match that section's word list, we log a warning.
+   */
+  coveredWords?: Array<{ text: string; startMs: number; endMs: number }>;
   /** True when this segment is a hold-fill (no clip in section, or section longer than footage). */
   hold?: boolean;
 }

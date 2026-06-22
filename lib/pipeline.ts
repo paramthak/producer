@@ -28,7 +28,13 @@ import type {
 } from "@/lib/types";
 import { PHASES } from "@/lib/types";
 
-const FRAME_FPS = 2;
+// 5fps gives Gemini frame descriptions at ~200ms resolution — the same
+// scale as a single spoken word. This is required for Rule 0's per-word
+// reasoning to find the exact source millisecond where each word's
+// content is visible (rather than interpolating between 500ms-apart
+// frames at the old 2fps). Cost is ~2.5× more describe-phase input
+// tokens; ~$0.08 extra per Generate at current Gemini Flash rates.
+const FRAME_FPS = 5;
 const CLIP_CONCURRENCY = 4;
 
 interface RunOpts {
