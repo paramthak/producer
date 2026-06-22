@@ -81,7 +81,30 @@ export function buildBundleZip(opts: BundleOpts): Readable {
     previewMp4AbsPath,
   } = opts;
 
-  const archive = archiver("zip", { zlib: { level: 1 } }); // fast compression — clips are already compressed
+  // Store mode (no compression). The bundle is 95%+ already-compressed
+  // media (mp4, jpg, mp3) — zlib spins CPU on them for ~0% size benefit.
+  // Store-only is 5-10× faster on bundle generation for our workload.
+  const archive = archiver("zip", { store: true });
+
+  // Wire fatal errors through the stream so the client's download loop
+  // sees a truncated body instead of a silent partial ZIP. Without these
+  // handlers, a missing/permission-denied source file mid-archive would
+  // close the stream cleanly and the browser would save a corrupt ZIP
+  // looking like a successful download.
+  archive.on("error", (err) => {
+    console.error("[zipBundle] archiver fatal:", err);
+    // archive.destroy() ends the readable with an error event the HTTP
+    // response will propagate as a truncated stream — the frontend
+    // detects this via Content-Length mismatch in the streaming reader.
+    (archive as unknown as { destroy?: (e?: Error) => void }).destroy?.(err);
+  });
+  archive.on("warning", (err) => {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      console.warn("[zipBundle] missing file (skipping):", err.message);
+    } else {
+      console.warn("[zipBundle] archiver warning:", err);
+    }
+  });
 
   // Disambiguated names: clipId → cleanedName (matches what's in the ZIP).
   const clipNames = disambiguateNames(manifest.clips);

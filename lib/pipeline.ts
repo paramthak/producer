@@ -10,6 +10,8 @@ import { forcedAlign } from "@/lib/elevenlabs/forcedAlign";
 import { computeSectionWindows } from "@/lib/sections";
 import { matchAndTrim } from "@/lib/gemini/matchAndTrim";
 import { hashPlan } from "@/lib/planHash";
+import { trimSilences } from "@/lib/silenceTrim";
+import { invalidateVoiceoverDownstream } from "@/lib/cacheInvalidate";
 import {
   addAlignCost,
   addDescribeCost,
@@ -174,6 +176,40 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
   } catch (err) {
     fail(jobId, "analyse", err);
   }
+  if (aborted(jobId)) return finishStopped(jobId);
+
+  // --- Phase 3.5: Trim long silences from the voiceover ----------------------------------------
+  // Runs BEFORE align so every downstream phase (align, map, match,
+  // assemble, render) works against a tight, silence-free timeline.
+  // Idempotent — if no silences ≥ 800ms exist (already-trimmed file on
+  // re-run, or recording with no dead air), this is effectively a no-op.
+  try {
+    setPhase(jobId, "trim", "running", "Trimming silences > 800ms…");
+    const voPath = path.join(p.base, manifest.voiceover!.relPath);
+    const trim = await trimSilences(voPath, {
+      silenceDb: -30,
+      minSilenceMs: 800,
+      signal: sigGetter(),
+    });
+    if (trim.silencesRemoved > 0) {
+      // Voiceover content changed on disk → any cached alignment/sections/
+      // edit-plan/preview are now stale. Delete them so the rest of the
+      // pipeline (and any subsequent re-runs) re-computes against the
+      // trimmed audio.
+      await invalidateVoiceoverDownstream(sessionId).catch(() => {});
+      setPhase(
+        jobId,
+        "trim",
+        "complete",
+        `Removed ${trim.silencesRemoved} silence${trim.silencesRemoved === 1 ? "" : "s"} (${(trim.msRemoved / 1000).toFixed(1)}s cut)`,
+      );
+    } else {
+      setPhase(jobId, "trim", "complete", "No long silences found");
+    }
+  } catch (err) {
+    fail(jobId, "trim", err);
+  }
+  if (aborted(jobId)) return finishStopped(jobId);
 
   // --- Phase 4: Align voiceover ---------------------------------------------------------------
   let words: WordTimestamp[];

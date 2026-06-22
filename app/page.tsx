@@ -26,6 +26,7 @@ import { PhaseStrip } from "@/components/processing/PhaseStrip";
 import { ElapsedTimer } from "@/components/processing/ElapsedTimer";
 import { Preview } from "@/components/editor/Preview";
 import { Timeline } from "@/components/editor/Timeline";
+import { DownloadProgress, type DownloadState } from "@/components/editor/DownloadProgress";
 import { resetSession, useSessionManifest } from "@/lib/builderStore";
 import { hashPlan } from "@/lib/planHash";
 import {
@@ -87,6 +88,16 @@ export default function StudioPage() {
   // same /api/job/[id] SSE stream as the main pipeline; on complete we
   // refetch the editor bundle so manifest.preview reflects the new render.
   const [renderJobId, setRenderJobId] = useState<string | null>(null);
+  // Bundle download is a long-running streamed operation — needs its own
+  // confirm dialog AND a progress modal that surfaces real bytes-received
+  // counts and any error mid-stream.
+  const [bundleConfirmOpen, setBundleConfirmOpen] = useState(false);
+  const [downloadState, setDownloadState] = useState<DownloadState>({
+    stage: "idle",
+    receivedBytes: 0,
+    totalBytes: null,
+  });
+  const downloadAbortRef = useRef<AbortController | null>(null);
   const seekNonceRef = useRef(0);
 
   // Current plan's hash, compared against manifest.preview.planHash to know
@@ -303,6 +314,101 @@ export default function StudioPage() {
     return () => es.close();
   }, [renderJobId, sessionId]);
 
+  // Streamed bundle download with real-percentage progress + error
+  // handling. Replaces the old `fetch → .blob() → click anchor` path,
+  // which had no progress reporting and silently swallowed mid-stream
+  // failures. Reads the response body chunk-by-chunk so the modal can
+  // show bytes received in real time; surfaces non-2xx / network /
+  // stream-interrupt errors with specific messages.
+  const downloadBundleStreamed = useCallback(async () => {
+    if (!sessionId) return;
+    // Cancel any in-flight download before starting a new one.
+    downloadAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    downloadAbortRef.current = ctrl;
+
+    setDownloadState({ stage: "preparing", receivedBytes: 0, totalBytes: null });
+    try {
+      const res = await fetch("/api/export/bundle", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error ?? `Server responded ${res.status}`);
+      }
+      if (!res.body) throw new Error("Response had no body");
+      const total = Number(res.headers.get("content-length") ?? 0) || null;
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      setDownloadState({ stage: "downloading", receivedBytes: 0, totalBytes: total });
+      // Streaming read loop — push the modal an update on each chunk.
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        setDownloadState({ stage: "downloading", receivedBytes: received, totalBytes: total });
+      }
+      // If server advertised a total but we got fewer bytes, the stream
+      // was truncated server-side (archiver error mid-pack). Surface it
+      // explicitly instead of saving a broken ZIP.
+      if (total && received < total) {
+        throw new Error(
+          `Download truncated — got ${received.toLocaleString()} of ${total.toLocaleString()} bytes. Server likely errored mid-archive. Try again.`,
+        );
+      }
+      setDownloadState({ stage: "saving", receivedBytes: received, totalBytes: total });
+      const blob = new Blob(chunks as BlobPart[], { type: "application/zip" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `producer-${sessionId.slice(0, 6)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setDownloadState({ stage: "done", receivedBytes: received, totalBytes: total });
+      toast.success("Downloaded project bundle");
+    } catch (err) {
+      if (ctrl.signal.aborted) {
+        // User cancelled — reset to idle silently, no modal stays open.
+        setDownloadState({ stage: "idle", receivedBytes: 0, totalBytes: null });
+        return;
+      }
+      const msg = err instanceof Error ? err.message : "Download failed";
+      setDownloadState((s) => ({
+        ...s,
+        stage: "error",
+        errorMessage: msg,
+      }));
+    } finally {
+      if (downloadAbortRef.current === ctrl) downloadAbortRef.current = null;
+    }
+  }, [sessionId]);
+
+  const cancelDownload = useCallback(() => {
+    downloadAbortRef.current?.abort();
+    setDownloadState({ stage: "idle", receivedBytes: 0, totalBytes: null });
+  }, []);
+
+  const closeDownloadModal = useCallback(() => {
+    setDownloadState({ stage: "idle", receivedBytes: 0, totalBytes: null });
+  }, []);
+
+  // Rough size estimate shown in the confirm dialog. Sums uploaded clip
+  // bytes + voiceover bytes. Excludes the rendered preview (we don't
+  // know its size from the manifest; it's small relative to source clips).
+  const bundleSizeEstimateBytes = useMemo(() => {
+    if (!editor) return 0;
+    const clipsSize = editor.manifest.clips.reduce((s, c) => s + (c.sizeBytes ?? 0), 0);
+    const voSize = editor.manifest.voiceover?.sizeBytes ?? 0;
+    return clipsSize + voSize;
+  }, [editor]);
+
   const exportFile = async (kind: ExportKind) => {
     if (!sessionId) return;
     setExporting(kind);
@@ -386,11 +492,15 @@ export default function StudioPage() {
                 </Button>
                 <Button
                   variant="outline"
-                  onClick={() => exportFile("bundle")}
-                  disabled={exporting !== "none"}
+                  onClick={() => setBundleConfirmOpen(true)}
+                  disabled={downloadState.stage !== "idle"}
                   title="Download the XML + all source clips + voiceover as a .zip — Premiere opens it with zero relink"
                 >
-                  {exporting === "bundle" ? <Loader2 className="size-4 animate-spin" /> : <FileArchive className="size-4" />}
+                  {downloadState.stage === "downloading" || downloadState.stage === "preparing" || downloadState.stage === "saving" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <FileArchive className="size-4" />
+                  )}
                   Download project (.zip)
                 </Button>
                 <Button onClick={() => exportFile("mp4")} disabled={exporting !== "none"} size="lg">
@@ -470,6 +580,21 @@ export default function StudioPage() {
           setResetting(true);
           await resetSession(sessionId);
         }}
+      />
+      <BundleConfirm
+        open={bundleConfirmOpen}
+        estimatedBytes={bundleSizeEstimateBytes}
+        onCancel={() => setBundleConfirmOpen(false)}
+        onConfirm={() => {
+          setBundleConfirmOpen(false);
+          void downloadBundleStreamed();
+        }}
+      />
+      <DownloadProgress
+        state={downloadState}
+        onCancel={cancelDownload}
+        onRetry={() => void downloadBundleStreamed()}
+        onClose={closeDownloadModal}
       />
       <RouterMirror router={router} mode={mode} />
     </div>
@@ -891,6 +1016,56 @@ function ResetConfirm({
               </Button>
             </div>
           </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ============================== BUNDLE DOWNLOAD CONFIRM ============================== */
+
+function BundleConfirm({
+  open,
+  estimatedBytes,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  estimatedBytes: number;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const sizeStr = (() => {
+    if (estimatedBytes <= 0) return null;
+    if (estimatedBytes < 1024 * 1024) return `${(estimatedBytes / 1024).toFixed(1)} KB`;
+    if (estimatedBytes < 1024 * 1024 * 1024) return `${(estimatedBytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(estimatedBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  })();
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onCancel(); }}>
+      <DialogContent className="!max-w-md">
+        <DialogTitle className="font-display text-lg font-semibold leading-tight">
+          Download project bundle?
+        </DialogTitle>
+        <DialogDescription className="mt-2 text-sm text-muted-foreground leading-relaxed">
+          You&apos;ll get a single <span className="font-mono">.zip</span> containing the XML
+          project file, all source clips, the voiceover, and the rendered preview MP4. Premiere /
+          Resolve / FCP open it with zero relink.
+          {sizeStr && (
+            <>
+              {" "}
+              <span className="text-foreground">Estimated size: ~{sizeStr}</span> (final ZIP may
+              differ slightly).
+            </>
+          )}
+        </DialogDescription>
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+          <Button variant="default" onClick={onConfirm}>
+            <FileArchive className="size-4" />
+            Download
+          </Button>
         </div>
       </DialogContent>
     </Dialog>

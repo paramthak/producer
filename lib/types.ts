@@ -108,6 +108,15 @@ export interface PlanSegment {
   timelineEndMs: number;
   whyClip: string;
   whyTrim: string;
+  /**
+   * Mandatory semantic-match audit string the model emits under Rule 0.
+   * Quotes both the spoken words at this segment's timeline range and
+   * the matching frame description from the source slice. Lets the
+   * editor (and humans inspecting whyMatch in the Timeline tooltip)
+   * verify the visual actually matches what's being said. Empty for
+   * hold-fill segments synthesized after the AI pass.
+   */
+  whyMatch?: string;
   /** True when this segment is a hold-fill (no clip in section, or section longer than footage). */
   hold?: boolean;
 }
@@ -121,6 +130,7 @@ export const PHASES = [
   "upload",
   "frames",
   "analyse",
+  "trim",
   "align",
   "map",
   "match",
@@ -133,6 +143,7 @@ export const PHASE_LABEL: Record<PhaseId, string> = {
   upload: "Upload & validate",
   frames: "Extract frames",
   analyse: "Analyse frames",
+  trim: "Trim voiceover silences",
   align: "Align voiceover",
   map: "Map sections to voiceover",
   match: "Match + trim clips",

@@ -7,6 +7,7 @@ import { nanoid } from "nanoid";
 import { ensureSession, paths, mediaUrl } from "@/lib/session";
 import { loadManifest, saveManifest } from "@/lib/manifest";
 import { probe, probeAudioDurationMs } from "@/lib/ffmpeg";
+import { invalidateClipsDownstream, invalidateVoiceoverDownstream } from "@/lib/cacheInvalidate";
 import { AUTH_COOKIE, AUTH_COOKIE_VALUE } from "@/lib/auth";
 import {
   AUDIO_EXTS,
@@ -201,6 +202,11 @@ export async function POST(req: NextRequest) {
       channels,
     };
     await saveManifest(manifest);
+    // The voiceover content changed (new file replaced the old one at
+    // the same path). Any cached alignment / sections / edit plan /
+    // rendered preview is now stale — nuke them so the next pipeline
+    // run rebuilds against the new audio.
+    await invalidateVoiceoverDownstream(sessionId).catch(() => {});
     return NextResponse.json({ sessionId, voiceover: manifest.voiceover, durationMs });
   }
 
@@ -253,6 +259,10 @@ export async function POST(req: NextRequest) {
   };
   manifest.clips.push(clip);
   await saveManifest(manifest);
+  // A new clip is a new candidate for the matcher. Any cached edit plan
+  // was computed without this clip, so it's stale. Frames/descriptions
+  // of OTHER clips remain valid.
+  await invalidateClipsDownstream(sessionId).catch(() => {});
 
   return NextResponse.json({ sessionId, clip });
 }

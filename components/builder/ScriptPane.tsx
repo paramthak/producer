@@ -173,21 +173,37 @@ export function ScriptPane({ value, onChange }: Props) {
           )}
         </pre>
         {/*
-          Selection-color fix: textarea text is `text-transparent` so the
-          colored <pre> underneath shows through. But selecting text reveals
-          the textarea's "invisible" glyphs against the selection background
-          as ghost characters doubled with the <pre>'s colored version.
-          Forcing ::selection foreground to transparent keeps selected
-          glyphs invisible — only the <pre>'s coloring shows even when
-          highlighted.
+          The textarea and the <pre> underneath must wrap text IDENTICALLY,
+          else long words/lines wrap at different x-positions and the user
+          sees character ghosting/doubling between the two layers. The
+          textarea also gets browser-default wrap which differs from the
+          pre's `break-words` — forcing both to the same explicit triple
+          (pre-wrap / break-word / anywhere) makes them produce pixel-for-
+          pixel identical layout.
+
+          -webkit-text-fill-color extends the transparent-text trick to
+          Safari's selection rendering. Without it, selecting text reveals
+          the textarea's "invisible" glyphs as ghosted overlays.
 
           Drag-drop suppression: the textarea has no business accepting
-          files. Without these handlers, the browser renders a file-preview
-          overlay (e.g. PDF icon) when something is dragged over.
+          files. Without these handlers, the browser renders a file-
+          preview overlay (e.g. PDF icon) when something is dragged over.
         */}
         <style>{`
-          .producer-script-textarea::selection { color: transparent; }
-          .producer-script-textarea::-moz-selection { color: transparent; }
+          .producer-script-textarea {
+            white-space: pre-wrap !important;
+            word-break: break-word !important;
+            overflow-wrap: anywhere !important;
+            -webkit-text-fill-color: transparent;
+          }
+          .producer-script-textarea::selection {
+            color: transparent;
+            -webkit-text-fill-color: transparent;
+          }
+          .producer-script-textarea::-moz-selection {
+            color: transparent;
+            -webkit-text-fill-color: transparent;
+          }
         `}</style>
         <textarea
           ref={taRef}
@@ -208,6 +224,7 @@ export function ScriptPane({ value, onChange }: Props) {
             }
           }}
           spellCheck={false}
+          wrap="soft"
           placeholder={`Paste your script, then mark sections with inline labels.\n\nhook: …\nbridge: …\nproduct: …\noutro: …\ncta: …`}
           style={{ caretColor: "hsl(var(--foreground))" }}
           className="producer-script-textarea relative block min-h-[15rem] w-full resize-y bg-transparent px-3 py-2 font-mono text-[13px] leading-[1.7] text-transparent caret-foreground outline-none placeholder:text-muted-foreground"
