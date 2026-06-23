@@ -1,6 +1,5 @@
 import archiver from "archiver";
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { buildXmeml } from "@/lib/xmeml";
@@ -39,38 +38,27 @@ export function disambiguateNames(clips: SourceClip[]): Record<string, string> {
 }
 
 /**
- * Predict the EXACT byte size of the streamed ZIP in store mode given
- * a list of entries. Each entry must indicate whether archiver will
- * append it as a buffer (in-memory string/Buffer — sets sizes upfront,
- * NO data descriptor) or a stream (createReadStream — sizes unknown at
- * local-header time, requires a 16-byte data descriptor after the
- * data block).
- *
- * Source: compress-commons/lib/archivers/zip/zip-archive-output-stream.js
- *   _appendStream  sets useDataDescriptor(true)
- *   _appendBuffer  does not — sizes are known immediately
+ * Predict the EXACT byte size of the ZIP in store mode given a list of
+ * entries. All entries are buffer-appended (no streams) which means
+ * archiver writes a complete local header with sizes upfront — NO data
+ * descriptor — so Premiere/Resolve/FCP parsers don't get confused by
+ * the unusual stored+DD combination.
  *
  * ZIP store-mode layout per entry:
  *   - Local file header        30 bytes + filename
  *   - File data                exact uncompressed size
- *   - (stream-only) Data desc  16 bytes (signature + crc + 2× size)
  *   - Central directory entry  46 bytes + filename
  * Plus once at end:
  *   - End of central directory record  22 bytes
- *
- * Verified against actual archiver output (file sizes summing to
- * 72,812,247 with this codebase's typical filename mix produced a ZIP
- * of 72,814,601 bytes — exactly matched by this formula).
  */
 export function predictStoreZipSize(
-  entries: Array<{ name: string; size: number; appendedAsStream: boolean }>,
+  entries: Array<{ name: string; size: number }>,
 ): number {
   let total = 0;
   for (const e of entries) {
     const nameLen = Buffer.byteLength(e.name, "utf8");
     total += 30 + nameLen; // local file header
     total += e.size; // data
-    if (e.appendedAsStream) total += 16; // data descriptor
     total += 46 + nameLen; // central directory entry
   }
   total += 22; // end of central directory record
@@ -86,10 +74,11 @@ export function predictStoreZipSize(
 export async function predictBundleSize(opts: BundleOpts): Promise<number | null> {
   const clipNames = disambiguateNames(opts.manifest.clips);
   const voiceoverName = opts.manifest.voiceover?.filename ?? "voiceover.mp3";
-  const entries: Array<{ name: string; size: number; appendedAsStream: boolean }> = [];
+  const entries: Array<{ name: string; size: number }> = [];
 
-  // The XML is appended as a string/Buffer — archiver uses _appendBuffer
-  // which doesn't write a data descriptor.
+  // All entries are buffer-appended (see buildBundleZip), so all entries
+  // are DD-free in the ZIP — that's why predictStoreZipSize doesn't add
+  // any 16-byte data-descriptor allowance per entry anymore.
   const xml = buildXmeml({
     projectName: opts.projectName,
     plan: opts.plan,
@@ -104,14 +93,11 @@ export async function predictBundleSize(opts: BundleOpts): Promise<number | null
   entries.push({
     name: `producer-${opts.sessionShort}.xml`,
     size: Buffer.byteLength(xml, "utf8"),
-    appendedAsStream: false,
   });
 
-  // Voiceover + clips + preview MP4 are all appended via createReadStream —
-  // archiver uses _appendStream which writes a 16-byte data descriptor.
   try {
     const voStat = await stat(opts.voiceoverAbsPath);
-    entries.push({ name: voiceoverName, size: voStat.size, appendedAsStream: true });
+    entries.push({ name: voiceoverName, size: voStat.size });
   } catch {
     return null;
   }
@@ -121,11 +107,7 @@ export async function predictBundleSize(opts: BundleOpts): Promise<number | null
     if (!abs) continue;
     try {
       const s = await stat(abs);
-      entries.push({
-        name: clipNames[clip.id] ?? clip.filename,
-        size: s.size,
-        appendedAsStream: true,
-      });
+      entries.push({ name: clipNames[clip.id] ?? clip.filename, size: s.size });
     } catch {
       return null;
     }
@@ -134,7 +116,7 @@ export async function predictBundleSize(opts: BundleOpts): Promise<number | null
   if (opts.previewMp4AbsPath) {
     try {
       const s = await stat(opts.previewMp4AbsPath);
-      entries.push({ name: "preview.mp4", size: s.size, appendedAsStream: true });
+      entries.push({ name: "preview.mp4", size: s.size });
     } catch {
       // Preview missing is fine — we just won't include it in the count.
     }
@@ -162,20 +144,27 @@ export interface BundleOpts {
 
 /**
  * Build a Node Readable stream that emits a ZIP containing:
- *   - producer-<sessionShort>.xml     (XMEML with disambiguated original
- *                                      filenames in <name>; pathurl points
- *                                      at the server path but Premiere
- *                                      relinks by name to files in the
- *                                      same folder as the XML)
- *   - <originalFilename>              (each source clip, with collision
- *                                      suffixes applied)
+ *   - producer-<sessionShort>.xml     (XMEML)
+ *   - <originalFilename>              (each source clip)
  *   - <voiceoverOriginalFilename>     (the voiceover audio)
  *   - preview.mp4                     (optional — the rendered preview)
  *
- * The user unzips → opens the .xml → Premiere finds every file. Zero
- * relink prompts.
+ * Why buffer-append (and not createReadStream): archiver's _appendStream
+ * unconditionally sets the data-descriptor flag on every entry. With
+ * the deflated (compressed) method, that's normal — and Premiere reads
+ * it fine. But with the stored (no-compression) method we use, the
+ * resulting "stored + data descriptor" combination is uncommon and
+ * Premiere's XMEML import silently fails on the ZIP. Buffer-append
+ * goes through _appendBuffer which writes a complete local header with
+ * sizes upfront — NO data descriptor — and Premiere reads it cleanly.
+ *
+ * Memory cost: peak ~sum-of-source-clip-bytes while building (each
+ * Buffer is held until archiver consumes it). For our ~70MB bundles
+ * that's negligible. Switching to a different archive lib that supports
+ * stored+streaming-without-DD is the only way to get both at once;
+ * the trade-off isn't worth it.
  */
-export function buildBundleZip(opts: BundleOpts): Readable {
+export async function buildBundleZip(opts: BundleOpts): Promise<Readable> {
   const {
     sessionShort,
     projectName,
@@ -187,21 +176,15 @@ export function buildBundleZip(opts: BundleOpts): Readable {
     previewMp4AbsPath,
   } = opts;
 
-  // Store mode (no compression). The bundle is 95%+ already-compressed
-  // media (mp4, jpg, mp3) — zlib spins CPU on them for ~0% size benefit.
-  // Store-only is 5-10× faster on bundle generation for our workload.
+  // Store mode (no compression). Bundle contents are 95%+ already-
+  // compressed media — zlib was spinning CPU on them for ~0% size
+  // benefit. See block comment above for why buffer-append matters.
   const archive = archiver("zip", { store: true });
 
   // Wire fatal errors through the stream so the client's download loop
-  // sees a truncated body instead of a silent partial ZIP. Without these
-  // handlers, a missing/permission-denied source file mid-archive would
-  // close the stream cleanly and the browser would save a corrupt ZIP
-  // looking like a successful download.
+  // sees a truncated body instead of a silent partial ZIP.
   archive.on("error", (err) => {
     console.error("[zipBundle] archiver fatal:", err);
-    // archive.destroy() ends the readable with an error event the HTTP
-    // response will propagate as a truncated stream — the frontend
-    // detects this via Content-Length mismatch in the streaming reader.
     (archive as unknown as { destroy?: (e?: Error) => void }).destroy?.(err);
   });
   archive.on("warning", (err) => {
@@ -212,14 +195,9 @@ export function buildBundleZip(opts: BundleOpts): Readable {
     }
   });
 
-  // Disambiguated names: clipId → cleanedName (matches what's in the ZIP).
   const clipNames = disambiguateNames(manifest.clips);
   const voiceoverName = manifest.voiceover?.filename ?? "voiceover.mp3";
 
-  // The XML inside the ZIP references files by basename — Premiere falls
-  // back to name-matching when the absolute pathurl doesn't resolve.
-  // Putting clipName as the <name>/<pathurl> basename guarantees a clean
-  // relink against files sitting next to the XML.
   const xml = buildXmeml({
     projectName,
     plan,
@@ -232,22 +210,33 @@ export function buildBundleZip(opts: BundleOpts): Readable {
     voiceoverName,
   });
 
-  archive.append(xml, { name: `producer-${sessionShort}.xml` });
+  // XML is already a buffer — straightforward append.
+  archive.append(Buffer.from(xml, "utf8"), { name: `producer-${sessionShort}.xml` });
 
-  // Voiceover at root with original filename.
-  archive.append(createReadStream(voiceoverAbsPath), { name: voiceoverName });
+  // Read each file fully into memory, then append as Buffer. This is the
+  // critical change from the previous createReadStream path — it forces
+  // archiver onto its _appendBuffer code path which doesn't emit a data
+  // descriptor on stored-mode entries (the cause of the Premiere
+  // silent-import bug).
+  const voBuf = await readFile(voiceoverAbsPath);
+  archive.append(voBuf, { name: voiceoverName });
 
-  // Each clip at root with its disambiguated original filename.
   for (const clip of manifest.clips) {
     const abs = clipAbsPath[clip.id];
     if (!abs) continue;
     const cleanName = clipNames[clip.id] ?? clip.filename;
-    archive.append(createReadStream(abs), { name: cleanName });
+    const buf = await readFile(abs);
+    archive.append(buf, { name: cleanName });
   }
 
-  // Rendered preview MP4 if available.
   if (previewMp4AbsPath) {
-    archive.append(createReadStream(previewMp4AbsPath), { name: "preview.mp4" });
+    try {
+      const buf = await readFile(previewMp4AbsPath);
+      archive.append(buf, { name: "preview.mp4" });
+    } catch {
+      // Preview missing — skip silently. The XMEML doesn't reference
+      // preview.mp4 so the bundle is still valid without it.
+    }
   }
 
   archive.finalize().catch(() => {

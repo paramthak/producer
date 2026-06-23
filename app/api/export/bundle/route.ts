@@ -64,12 +64,12 @@ export async function POST(req: NextRequest) {
     previewMp4AbsPath,
   };
 
-  // Predict the exact byte length of the streamed ZIP and send it as
-  // Content-Length. Without this header the frontend's progress bar has
-  // no total to divide against and defaults to a placeholder fill.
-  // Store-mode ZIP overhead is deterministic so the prediction is exact.
+  // Predict the exact byte length of the ZIP and send it as Content-Length.
+  // Without this header the frontend's progress bar has no total to divide
+  // against. Store-mode ZIP overhead is deterministic and buffer-append
+  // means no data descriptors, so the prediction is exact.
   const predictedSize = await predictBundleSize(bundleOpts);
-  const zipStream = buildBundleZip(bundleOpts);
+  const zipStream = await buildBundleZip(bundleOpts);
 
   const headers: Record<string, string> = {
     "content-type": "application/zip",
