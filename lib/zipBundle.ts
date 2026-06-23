@@ -23,7 +23,7 @@ export function disambiguateNames(clips: SourceClip[]): Record<string, string> {
   const result: Record<string, string> = {};
   const used = new Set<string>();
   for (const c of clips) {
-    let name = c.filename;
+    let name = sanitizeForNleRelink(c.filename);
     if (used.has(name.toLowerCase())) {
       const ext = path.extname(name);
       const base = name.slice(0, name.length - ext.length);
@@ -35,6 +35,42 @@ export function disambiguateNames(clips: SourceClip[]): Record<string, string> {
     result[c.id] = name;
   }
   return result;
+}
+
+/**
+ * Strip filename characters that break Premiere's XMEML name-relink.
+ *
+ * The failure mode this fixes: a clip whose original filename contains a
+ * non-ASCII General Punctuation character (e.g. the horizontal ellipsis
+ * `…` at U+2026, smart quotes, em-dash) makes Premiere silently fail the
+ * ENTIRE XMEML import — not just that one clip. ZIP filename encoding +
+ * macOS Finder's unzip + Premiere's name-relink form a fragile chain;
+ * one byte-mismatch anywhere and the whole import goes blank with no
+ * error dialog.
+ *
+ * Plain emoji (regional indicators, faces) round-trip cleanly in our
+ * testing, so we keep those. The rule below: NFC-normalize, then keep
+ * only letters/digits and a small whitelist of safe punctuation. Any
+ * other codepoint becomes `_`. Symmetric — the same sanitized name is
+ * used in the ZIP entry, the XMEML `<name>`, and the XMEML `<pathurl>`
+ * basename, so byte mismatch is impossible.
+ *
+ * Trailing/leading underscores from a run of replacements are collapsed
+ * so we don't ship "Dublin_____202606081535.mp4" looking glitchy.
+ */
+function sanitizeForNleRelink(filename: string): string {
+  const ext = path.extname(filename);
+  const base = filename.slice(0, filename.length - ext.length);
+  const normalized = base.normalize("NFC");
+  const cleaned = normalized
+    // Keep letters/digits in any script (including emoji), spaces, and a
+    // small whitelist of punctuation that XMEML + macOS + Premiere all
+    // round-trip cleanly.
+    .replace(/[^\p{L}\p{N}\p{Emoji} ._\-(),&]+/gu, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
+  const cleanedExt = ext.normalize("NFC").replace(/[^\p{L}\p{N}.]/gu, "");
+  return (cleaned || "clip") + cleanedExt;
 }
 
 /**
