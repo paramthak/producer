@@ -4,9 +4,12 @@ import { paths, readJson } from "@/lib/session";
 import { loadManifestWithAudioInfo } from "@/lib/audioProbe";
 import { buildXmeml } from "@/lib/xmeml";
 import { disambiguateNames } from "@/lib/zipBundle";
+import { loadOrInitSubtitleState } from "@/lib/subtitlesStore";
+import { renderGreenScreenSubs } from "@/lib/subtitleRender";
 import type { EditPlan, WordTimestamp } from "@/lib/types";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 /**
  * Export the edit as FCP7 XML (XMEML version 5).
@@ -48,6 +51,25 @@ export async function POST(req: NextRequest) {
   // on disk if they re-downloaded the bundle. Premiere relinks by name.
   const clipNames = disambiguateNames(m.clips);
 
+  // Render (cached) the green-screen subtitles.mp4 and reference it on a top
+  // video track with its absolute on-disk path — standalone XML is for the
+  // same-machine case, so the path resolves directly.
+  let subtitleVideo: { name: string; absPath: string; durationMs: number } | undefined;
+  try {
+    const subState = await loadOrInitSubtitleState(body.sessionId);
+    if (subState?.captions?.length) {
+      const r = await renderGreenScreenSubs({
+        state: subState,
+        totalMs: alignment.durationMs,
+        outputDir: p.output,
+        signal: req.signal,
+      });
+      subtitleVideo = { name: r.filename, absPath: r.absPath, durationMs: alignment.durationMs };
+    }
+  } catch (err) {
+    console.error("[export/xml] subtitle render failed:", err);
+  }
+
   const xml = buildXmeml({
     projectName: `Producer-${body.sessionId.slice(0, 6)}`,
     plan,
@@ -58,6 +80,7 @@ export async function POST(req: NextRequest) {
     voiceoverChannels: m.voiceover.channels,
     clipNames,
     voiceoverName: m.voiceover.filename,
+    subtitleVideo,
   });
 
   return new Response(xml, {

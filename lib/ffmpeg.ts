@@ -5,6 +5,18 @@ import path from "node:path";
 const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 const FFPROBE = process.env.FFPROBE_PATH || "ffprobe";
 
+/** Resolved ffmpeg binary path (honours FFMPEG_PATH). */
+export const FFMPEG_BIN = FFMPEG;
+
+/**
+ * Run an arbitrary ffmpeg invocation, honouring an AbortSignal (kills the
+ * child on abort) and surfacing stderr on failure. Used by the subtitle
+ * renderer, which composes its own multi-input filtergraphs.
+ */
+export function runFfmpeg(args: string[], signal?: AbortSignal): Promise<void> {
+  return runVoid(FFMPEG, args, signal);
+}
+
 export interface ProbeResult {
   durationMs: number;
   width?: number;

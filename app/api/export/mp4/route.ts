@@ -4,11 +4,14 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { paths, readJson } from "@/lib/session";
 import { loadManifest } from "@/lib/manifest";
+import { loadOrInitSubtitleState } from "@/lib/subtitlesStore";
+import { renderSubtitledMp4 } from "@/lib/subtitleRender";
 import { hashPlan } from "@/lib/planHash";
 import { nodeStreamToWebStream } from "@/lib/streamHelpers";
 import type { EditPlan } from "@/lib/types";
 
 export const runtime = "nodejs";
+export const maxDuration = 600;
 
 /**
  * Cache passthrough.
@@ -24,7 +27,7 @@ export const runtime = "nodejs";
  * to click "Re-render preview" before downloading.
  */
 export async function POST(req: NextRequest) {
-  const body = (await req.json()) as { sessionId: string };
+  const body = (await req.json()) as { sessionId: string; subtitles?: boolean };
   if (!body.sessionId) {
     return new Response(JSON.stringify({ error: "Missing sessionId" }), { status: 400 });
   }
@@ -77,12 +80,47 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const stream = createReadStream(outPath);
+  // Default: stream the bare preview (subtitles live on a separate layer).
+  let fileToStream = outPath;
+  let fileSize = stats.size;
+
+  // "Download MP4 with subtitles" → burn the captions onto the preview.
+  if (body.subtitles) {
+    const subState = await loadOrInitSubtitleState(body.sessionId);
+    const alignment = await readJson<{ words: unknown[]; durationMs: number }>(p.alignment);
+    if (!subState?.captions?.length) {
+      return new Response(
+        JSON.stringify({ error: "No subtitles to burn in. Generate the reel first." }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }
+    try {
+      const burned = await renderSubtitledMp4({
+        previewPath: outPath,
+        planHash: m.preview.planHash,
+        state: subState,
+        totalMs: alignment?.durationMs ?? plan.totalDurationMs,
+        outputDir: p.output,
+        signal: req.signal,
+      });
+      fileToStream = burned.absPath;
+      fileSize = (await stat(burned.absPath)).size;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Subtitle render failed";
+      return new Response(JSON.stringify({ error: `Could not burn subtitles: ${msg}` }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+    }
+  }
+
+  const suffix = body.subtitles ? "-subtitled" : "";
+  const stream = createReadStream(fileToStream);
   return new Response(nodeStreamToWebStream(stream, req.signal), {
     headers: {
       "content-type": "video/mp4",
-      "content-length": String(stats.size),
-      "content-disposition": `attachment; filename="producer-${body.sessionId.slice(0, 6)}.mp4"`,
+      "content-length": String(fileSize),
+      "content-disposition": `attachment; filename="producer-${body.sessionId.slice(0, 6)}${suffix}.mp4"`,
       "cache-control": "no-store",
     },
   });

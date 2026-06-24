@@ -33,6 +33,7 @@ import {
   SECTIONS,
   SECTION_LABEL,
   SECTION_DOT_VAR,
+  type Caption,
   type EditPlan,
   type PlanSegment,
   type SectionId,
@@ -47,6 +48,8 @@ interface Props {
   clipsBySection: Record<SectionId, SourceClip[]>;
   totalDurationMs: number;
   voiceoverWords?: WordTimestamp[];
+  /** Caption chunks for the SUBS track (read-only; click to seek). */
+  captions?: Caption[];
   currentTimeMs?: number;
   onSeek?: (ms: number) => void;
   onChange: (plan: EditPlan) => void;
@@ -156,6 +159,7 @@ export function Timeline({
   clipsBySection,
   totalDurationMs,
   voiceoverWords,
+  captions,
   currentTimeMs = 0,
   onSeek,
   onChange,
@@ -377,6 +381,37 @@ export function Timeline({
             </div>
           )}
         </div>
+
+        {/* SUBS row */}
+        {captions && captions.length > 0 && (
+          <div className="relative border-t border-border/60" style={{ height: 44 }}>
+            <RowLabel label="SUBS" />
+            {captions.map((c) => {
+              const left = c.startMs * pxPerMs;
+              const width = Math.max(8, (c.endMs - c.startMs) * pxPerMs);
+              const text = c.words.map((w) => w.text).join(" ");
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => onSeek?.(c.startMs)}
+                  title={text}
+                  className="absolute top-1.5 bottom-1.5 z-[2] flex items-center overflow-hidden rounded-md border border-primary/40 bg-primary/10 px-1.5 text-[10px] text-foreground/80 hover:bg-primary/20"
+                  style={{ left, width }}
+                >
+                  <span className="truncate">
+                    {c.words.map((w, i) => (
+                      <span key={i} className={w.bold ? "font-bold text-primary" : undefined}>
+                        {w.text}
+                        {i < c.words.length - 1 ? " " : ""}
+                      </span>
+                    ))}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Playhead */}
         <div

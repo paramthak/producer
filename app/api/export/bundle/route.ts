@@ -3,6 +3,8 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { paths, readJson } from "@/lib/session";
 import { loadManifestWithAudioInfo } from "@/lib/audioProbe";
+import { loadOrInitSubtitleState } from "@/lib/subtitlesStore";
+import { renderGreenScreenSubs } from "@/lib/subtitleRender";
 import { buildBundleZip, predictBundleSize } from "@/lib/zipBundle";
 import { nodeStreamToWebStream } from "@/lib/streamHelpers";
 import type { EditPlan, WordTimestamp } from "@/lib/types";
@@ -52,6 +54,27 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Render the green-screen subtitles.mp4 (cached by subtitle-state hash) so
+  // the ZIP carries the finalized caption layer as a SEPARATE top track.
+  // Subtitles are NEVER burned into the source clips here.
+  let subtitleVideoAbsPath: string | undefined;
+  try {
+    const subState = await loadOrInitSubtitleState(body.sessionId);
+    if (subState?.captions?.length) {
+      const r = await renderGreenScreenSubs({
+        state: subState,
+        totalMs: alignment.durationMs,
+        outputDir: p.output,
+        signal: req.signal,
+      });
+      subtitleVideoAbsPath = r.absPath;
+    }
+  } catch (err) {
+    // Don't fail the whole bundle if subtitle rendering trips — ship the
+    // project without the caption track rather than nothing.
+    console.error("[export/bundle] subtitle render failed:", err);
+  }
+
   const sessionShort = body.sessionId.slice(0, 6);
   const bundleOpts = {
     sessionShort,
@@ -62,6 +85,7 @@ export async function POST(req: NextRequest) {
     voiceoverAbsPath: path.join(p.base, m.voiceover.relPath),
     voiceoverDurationMs: alignment.durationMs,
     previewMp4AbsPath,
+    subtitleVideoAbsPath,
   };
 
   // Predict the exact byte length of the ZIP and send it as Content-Length.

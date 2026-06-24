@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, Pause, Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { formatDuration } from "@/lib/utils";
-import type { EditPlan } from "@/lib/types";
+import { SubtitleLayer } from "@/components/editor/SubtitleLayer";
+import type { Caption, EditPlan, SubtitleStyle } from "@/lib/types";
 
 interface Props {
   /**
@@ -31,6 +32,12 @@ interface Props {
   onTime?: (ms: number) => void;
   /** Fires when the active segment changes. */
   onActiveSegmentChange?: (segId: string | null) => void;
+  /** Caption chunks (forced-alignment derived) for the live subtitle overlay. */
+  captions?: Caption[];
+  /** Global subtitle style; null hides the overlay. */
+  subtitleStyle?: SubtitleStyle | null;
+  /** Persist style edits (drag/toolbar) from the overlay. */
+  onSubtitleStyleChange?: (s: SubtitleStyle) => void;
 }
 
 /**
@@ -55,6 +62,9 @@ export function Preview({
   seekRequest,
   onTime,
   onActiveSegmentChange,
+  captions,
+  subtitleStyle,
+  onSubtitleStyleChange,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -140,6 +150,17 @@ export function Preview({
             onPause={() => setPlaying(false)}
             onEnded={() => setPlaying(false)}
             className="absolute inset-0 h-full w-full object-cover"
+          />
+        )}
+
+        {/* Live caption overlay — same SVG markup as the export (parity). */}
+        {!showEmptyState && subtitleStyle && captions && captions.length > 0 && (
+          <SubtitleLayer
+            currentMs={currentMs}
+            captions={captions}
+            style={subtitleStyle}
+            editable={!isRendering}
+            onChange={(s) => onSubtitleStyleChange?.(s)}
           />
         )}
 

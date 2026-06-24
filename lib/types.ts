@@ -134,12 +134,87 @@ export interface EditPlan {
   totalDurationMs: number;
 }
 
+/* ============================== SUBTITLES ============================== */
+
+/**
+ * The two built-in caption looks, reverse-engineered from the reference
+ * VEED green-screen exports:
+ *  - "lowerLeftDisplay" (default): lower-left, two-tier — a huge bold sans
+ *    keyword on its own line + the supporting words in a smaller serif
+ *    italic line (e.g. "six" / "months.").
+ *  - "centeredSerif": centered single line, serif, emphasized words in a
+ *    bright highlight colour + bold (e.g. "the *entire* study").
+ * The preset fixes the structural/emphasis treatment; the user overrides
+ * font family, base size, base/highlight colour and vertical position.
+ */
+export type SubtitlePreset = "lowerLeftDisplay" | "centeredSerif";
+export const SUBTITLE_PRESETS = ["lowerLeftDisplay", "centeredSerif"] as const;
+
+/** Font families offered in the toolbar dropdown (bundled in public/fonts). */
+export const SUBTITLE_FONTS = ["Inter", "Libre Caslon Text"] as const;
+export type SubtitleFont = (typeof SUBTITLE_FONTS)[number];
+
+/** One spoken word inside a caption, with its forced-alignment timing. */
+export interface CaptionWord {
+  text: string;
+  startMs: number;
+  endMs: number;
+  /** Emphasized (highlighted/bold) — set by the highlight LLM, user-toggleable. */
+  bold: boolean;
+}
+
+/** A single on-screen caption chunk (a VEED-style phrase group). */
+export interface Caption {
+  id: string;
+  startMs: number;
+  endMs: number;
+  words: CaptionWord[];
+}
+
+/**
+ * Global subtitle styling. Applies uniformly to every caption (per the
+ * product decision — only per-word emphasis is local). Sizes/positions are
+ * expressed in the 1080×1920 export coordinate space; the live overlay
+ * renders the exact same SVG scaled into the preview, so they always match.
+ */
+export interface SubtitleStyle {
+  enabled: boolean;
+  preset: SubtitlePreset;
+  /** Base (normal-word) font family. */
+  fontFamily: SubtitleFont;
+  /** Base font size in px at 1080px width. */
+  fontSize: number;
+  /** Base (normal-word) text colour, hex. */
+  color: string;
+  /** Emphasis/highlight colour, hex. */
+  highlightColor: string;
+  /**
+   * Emphasized-word font family. Optional for back-compat — when absent it
+   * falls back to the preset's intrinsic emphasis font (or the base family).
+   */
+  highlightFontFamily?: SubtitleFont;
+  /**
+   * Emphasized-word font size in px at 1080px width. Optional for back-compat
+   * — when absent it falls back to base size × the preset's emphasis scale.
+   */
+  highlightFontSize?: number;
+  /** Vertical centre of the caption block as a fraction of height (0..1). */
+  positionY: number;
+}
+
+/** The full persisted subtitle state for a session (subtitles.json). */
+export interface SubtitleState {
+  style: SubtitleStyle;
+  captions: Caption[];
+}
+
 export const PHASES = [
   "upload",
   "frames",
   "analyse",
   "trim",
   "align",
+  "caption",
   "map",
   "match",
   "assemble",
@@ -153,6 +228,7 @@ export const PHASE_LABEL: Record<PhaseId, string> = {
   analyse: "Analyse frames",
   trim: "Trim voiceover silences",
   align: "Align voiceover",
+  caption: "Build & highlight captions",
   map: "Map sections to voiceover",
   match: "Match + trim clips",
   assemble: "Assemble preview",

@@ -2,6 +2,55 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Subtitle fonts. The live caption overlay renders the SAME SVG markup that
+ * the server hands to resvg, so the browser must have these exact families
+ * (and weights) available or the preview won't match the export. Static
+ * instances live in /public/fonts (see context.md §22).
+ */
+@font-face {
+  font-family: "Inter";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/Inter-Regular.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Inter";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/Inter-Bold.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Inter";
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/Inter-Black.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Libre Caslon Text";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/LibreCaslonText-Regular.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Libre Caslon Text";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/LibreCaslonText-Bold.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Libre Caslon Text";
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+  src: url("/fonts/LibreCaslonText-Italic.ttf") format("truetype");
+}
+
 @layer base {
   :root {
     /* Cosmic Studio — vivid, alive, energetic dark */

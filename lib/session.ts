@@ -25,6 +25,7 @@ export function paths(sessionId: string) {
     alignment: path.join(base, "alignment.json"),
     sections: path.join(base, "sections.json"),
     editPlan: path.join(base, "edit-plan.json"),
+    subtitles: path.join(base, "subtitles.json"),
     output: path.join(base, "output"),
     manifest: path.join(base, "manifest.json"),
   };

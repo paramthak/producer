@@ -27,16 +27,20 @@ import { ElapsedTimer } from "@/components/processing/ElapsedTimer";
 import { Preview } from "@/components/editor/Preview";
 import { Timeline } from "@/components/editor/Timeline";
 import { DownloadProgress, type DownloadState } from "@/components/editor/DownloadProgress";
+import { SubtitleScriptBox } from "@/components/editor/SubtitleScriptBox";
 import { resetSession, useSessionManifest } from "@/lib/builderStore";
 import { hashPlan } from "@/lib/planHash";
 import {
   PHASE_LABEL,
   SECTIONS,
+  type Caption,
   type EditPlan,
   type JobState,
   type SectionId,
   type SectionWindow,
   type SourceClip,
+  type SubtitleState,
+  type SubtitleStyle,
   type WordTimestamp,
 } from "@/lib/types";
 import { formatDuration } from "@/lib/utils";
@@ -61,12 +65,14 @@ interface EditorData {
         describe: { calls: number; inputTokens: number; outputTokens: number; usd: number };
         match: { calls: number; inputTokens: number; outputTokens: number; usd: number };
         align: { calls: number; audioMs: number; usd: number };
+        caption?: { calls: number; inputTokens: number; outputTokens: number; usd: number };
       };
     };
   };
   plan: EditPlan;
   sections: { windows: SectionWindow[]; totalDurationMs: number };
   alignment: { words: WordTimestamp[]; durationMs: number };
+  subtitles?: SubtitleState | null;
 }
 
 export default function StudioPage() {
@@ -78,8 +84,10 @@ export default function StudioPage() {
   const [submitting, setSubmitting] = useState(false);
   const [editor, setEditor] = useState<EditorData | null>(null);
   const [plan, setPlan] = useState<EditPlan | null>(null);
+  const [subtitles, setSubtitles] = useState<SubtitleState | null>(null);
   const [overridePrompt, setOverridePrompt] = useState("");
   const [exporting, setExporting] = useState<"none" | ExportKind>("none");
+  const [mp4ModalOpen, setMp4ModalOpen] = useState(false);
   const [seekReq, setSeekReq] = useState<{ ms: number; nonce: number } | null>(null);
   const [currentMs, setCurrentMs] = useState(0);
   const [resetOpen, setResetOpen] = useState(false);
@@ -122,6 +130,7 @@ export default function StudioPage() {
         const j = (await res.json()) as EditorData;
         setEditor(j);
         setPlan(j.plan);
+        setSubtitles(j.subtitles ?? null);
         setOverridePrompt(j.manifest.overridePrompt ?? "");
         setMode("edit");
       }
@@ -212,6 +221,7 @@ export default function StudioPage() {
             const j = (await res.json()) as EditorData;
             setEditor(j);
             setPlan(j.plan);
+            setSubtitles(j.subtitles ?? null);
             setOverridePrompt(j.manifest.overridePrompt ?? "");
             setMode("edit");
           }
@@ -246,6 +256,49 @@ export default function StudioPage() {
     setPlan(next);
     savePlanDebounced(next);
   };
+
+  const saveSubtitlesDebounced = useMemo(() => {
+    let t: ReturnType<typeof setTimeout> | null = null;
+    return (next: SubtitleState) => {
+      if (!sessionId) return;
+      if (t) clearTimeout(t);
+      t = setTimeout(() => {
+        void fetch("/api/subtitles", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId, subtitles: next }),
+        });
+      }, 300);
+    };
+  }, [sessionId]);
+
+  // Subtitle edits update local state instantly (live preview) and persist
+  // debounced. Downloads read the persisted state, so the export always
+  // reflects the finalized look.
+  const onSubtitleStyleChange = useCallback(
+    (style: SubtitleStyle) => {
+      setSubtitles((prev) => {
+        const base = prev ?? (subtitles as SubtitleState | null);
+        if (!base) return prev;
+        const next = { ...base, style };
+        saveSubtitlesDebounced(next);
+        return next;
+      });
+    },
+    [subtitles, saveSubtitlesDebounced],
+  );
+
+  const onCaptionsChange = useCallback(
+    (captions: Caption[]) => {
+      setSubtitles((prev) => {
+        if (!prev) return prev;
+        const next = { ...prev, captions };
+        saveSubtitlesDebounced(next);
+        return next;
+      });
+    },
+    [saveSubtitlesDebounced],
+  );
 
   const onSeek = (ms: number) => {
     seekNonceRef.current += 1;
@@ -409,14 +462,14 @@ export default function StudioPage() {
     return clipsSize + voSize;
   }, [editor]);
 
-  const exportFile = async (kind: ExportKind) => {
+  const exportFile = async (kind: ExportKind, opts?: { subtitles?: boolean }) => {
     if (!sessionId) return;
     setExporting(kind);
     try {
       const res = await fetch(`/api/export/${kind}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify({ sessionId, subtitles: opts?.subtitles }),
       });
       if (!res.ok) {
         // The MP4 cache-passthrough returns 409 when the cached render is
@@ -433,12 +486,15 @@ export default function StudioPage() {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
-      a.download = `producer-${sessionId.slice(0, 6)}.${kind === "bundle" ? "zip" : kind}`;
+      a.href = url; // REQUIRED — without it the click is a no-op (nothing downloads).
+      const subSuffix = kind === "mp4" && opts?.subtitles ? "-subtitled" : "";
+      a.download = `producer-${sessionId.slice(0, 6)}${subSuffix}.${kind === "bundle" ? "zip" : kind}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(url);
+      // Defer revoke so the browser has the URL when it starts the download
+      // (revoking synchronously can cancel it for larger blobs in some browsers).
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
       const message =
         kind === "mp4"
           ? "Downloaded MP4"
@@ -503,7 +559,7 @@ export default function StudioPage() {
                   )}
                   Download project (.zip)
                 </Button>
-                <Button onClick={() => exportFile("mp4")} disabled={exporting !== "none"} size="lg">
+                <Button onClick={() => setMp4ModalOpen(true)} disabled={exporting !== "none"} size="lg">
                   {exporting === "mp4" ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
                   Download MP4
                 </Button>
@@ -555,6 +611,9 @@ export default function StudioPage() {
               isPreviewStale={isPreviewStale}
               isRendering={isRendering}
               onRequestRerender={onRequestRerender}
+              subtitleState={subtitles}
+              onSubtitleStyleChange={onSubtitleStyleChange}
+              onCaptionsChange={onCaptionsChange}
             />
           )
         )}
@@ -588,6 +647,16 @@ export default function StudioPage() {
         onConfirm={() => {
           setBundleConfirmOpen(false);
           void downloadBundleStreamed();
+        }}
+      />
+      <Mp4DownloadModal
+        open={mp4ModalOpen}
+        busy={exporting === "mp4"}
+        hasSubtitles={!!(subtitles?.captions?.length && subtitles.style.enabled)}
+        onCancel={() => setMp4ModalOpen(false)}
+        onPick={(withSubs) => {
+          setMp4ModalOpen(false);
+          void exportFile("mp4", { subtitles: withSubs });
         }}
       />
       <DownloadProgress
@@ -759,6 +828,9 @@ interface EditViewProps {
   isPreviewStale: boolean;
   isRendering: boolean;
   onRequestRerender: () => void;
+  subtitleState: SubtitleState | null;
+  onSubtitleStyleChange: (s: SubtitleStyle) => void;
+  onCaptionsChange: (c: Caption[]) => void;
 }
 
 function EditView({
@@ -779,6 +851,9 @@ function EditView({
   isPreviewStale,
   isRendering,
   onRequestRerender,
+  subtitleState,
+  onSubtitleStyleChange,
+  onCaptionsChange,
 }: EditViewProps) {
   const totalMs = plan.totalDurationMs || editor.alignment.durationMs;
   return (
@@ -826,6 +901,9 @@ function EditView({
                 totalDurationMs={totalMs}
                 seekRequest={seekReq}
                 onTime={onTime}
+                captions={subtitleState?.captions}
+                subtitleStyle={subtitleState?.style ?? null}
+                onSubtitleStyleChange={onSubtitleStyleChange}
               />
             </CardContent>
           </Card>
@@ -833,14 +911,25 @@ function EditView({
 
         <aside className="flex flex-col gap-3">
           <Card>
-            <CardHeader className="p-4 pb-2">
-              <CardTitle className="text-base">Tips</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-1.5 p-4 pt-0 text-xs text-muted-foreground leading-relaxed">
-              <p>· Click the timeline ruler to scrub.</p>
-              <p>· Hover a clip card to see why this clip was picked.</p>
-              <p>· Drag the edges to re-trim. Drag the body to reorder within a section.</p>
-              <p>· Use ⇄ on a card to swap with another clip from its section.</p>
+            <CardContent className="p-4">
+              {subtitleState ? (
+                <SubtitleScriptBox
+                  style={subtitleState.style}
+                  captions={subtitleState.captions}
+                  onStyleChange={onSubtitleStyleChange}
+                  onCaptionsChange={onCaptionsChange}
+                />
+              ) : (
+                <p className="py-6 text-center text-xs text-muted-foreground">
+                  Subtitles will appear here once the reel is generated.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="space-y-1 p-3 text-[11px] text-muted-foreground leading-relaxed">
+              <p>· Click a caption on the video to restyle; drag it up/down to reposition.</p>
+              <p>· Drag clip edges to re-trim; drag the body to reorder within a section.</p>
             </CardContent>
           </Card>
         </aside>
@@ -859,6 +948,7 @@ function EditView({
           clipsBySection={clipsBySection}
           totalDurationMs={totalMs}
           voiceoverWords={editor.alignment.words}
+          captions={subtitleState?.captions}
           currentTimeMs={currentMs}
           onSeek={onSeek}
           onChange={onPlanChange}
@@ -891,6 +981,7 @@ function CostChip({
     describe: { calls: number; inputTokens: number; outputTokens: number; usd: number };
     match: { calls: number; inputTokens: number; outputTokens: number; usd: number };
     align: { calls: number; audioMs: number; usd: number };
+    caption?: { calls: number; inputTokens: number; outputTokens: number; usd: number };
   };
 }) {
   const tooltip = breakdown
@@ -898,6 +989,9 @@ function CostChip({
         `Gemini describe: $${breakdown.describe.usd.toFixed(4)} (${breakdown.describe.calls} calls, ${breakdown.describe.inputTokens.toLocaleString()} in / ${breakdown.describe.outputTokens.toLocaleString()} out tokens)`,
         `Gemini match: $${breakdown.match.usd.toFixed(4)} (${breakdown.match.calls} calls, ${breakdown.match.inputTokens.toLocaleString()} in / ${breakdown.match.outputTokens.toLocaleString()} out tokens)`,
         `ElevenLabs align: $${breakdown.align.usd.toFixed(4)} (${breakdown.align.calls} calls, ${(breakdown.align.audioMs / 1000).toFixed(1)}s audio)`,
+        ...(breakdown.caption
+          ? [`Gemini captions: $${breakdown.caption.usd.toFixed(4)} (${breakdown.caption.calls} calls)`]
+          : []),
       ].join("\n")
     : "No API spend yet this session";
   return (
@@ -1065,6 +1159,48 @@ function BundleConfirm({
           <Button variant="default" onClick={onConfirm}>
             <FileArchive className="size-4" />
             Download
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ============================== MP4 DOWNLOAD MODAL ============================== */
+
+function Mp4DownloadModal({
+  open,
+  busy,
+  hasSubtitles,
+  onCancel,
+  onPick,
+}: {
+  open: boolean;
+  busy: boolean;
+  hasSubtitles: boolean;
+  onCancel: () => void;
+  onPick: (withSubtitles: boolean) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) onCancel(); }}>
+      <DialogContent className="!max-w-md">
+        <DialogTitle className="font-display text-lg font-semibold leading-tight">
+          Download MP4
+        </DialogTitle>
+        <DialogDescription className="mt-2 text-sm text-muted-foreground leading-relaxed">
+          {hasSubtitles
+            ? "Burn the captions into the video, or export the clean cut without them. (The .zip export always keeps subtitles as a separate green-screen layer.)"
+            : "No captions are enabled, so the MP4 will export without subtitles."}
+        </DialogDescription>
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <Button variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
+          <Button variant="outline" onClick={() => onPick(false)} disabled={busy}>
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <FileVideo className="size-4" />}
+            Without subtitles
+          </Button>
+          <Button onClick={() => onPick(true)} disabled={busy || !hasSubtitles}>
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
+            With subtitles
           </Button>
         </div>
       </DialogContent>

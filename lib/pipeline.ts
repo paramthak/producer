@@ -9,11 +9,14 @@ import { describeClip } from "@/lib/gemini/describeFrames";
 import { forcedAlign } from "@/lib/elevenlabs/forcedAlign";
 import { computeSectionWindows } from "@/lib/sections";
 import { matchAndTrim } from "@/lib/gemini/matchAndTrim";
+import { highlightWords } from "@/lib/gemini/highlightWords";
+import { chunkCaptions, defaultSubtitleStyle } from "@/lib/subtitles";
 import { hashPlan } from "@/lib/planHash";
 import { trimSilences } from "@/lib/silenceTrim";
 import { invalidateVoiceoverDownstream } from "@/lib/cacheInvalidate";
 import {
   addAlignCost,
+  addCaptionCost,
   addDescribeCost,
   addMatchCost,
   emptyCosts,
@@ -24,6 +27,7 @@ import type {
   EditPlan,
   PhaseId,
   SectionWindow,
+  SubtitleState,
   WordTimestamp,
 } from "@/lib/types";
 import { PHASES } from "@/lib/types";
@@ -242,6 +246,36 @@ export async function runPipeline(opts: RunOpts): Promise<void> {
     setPhase(jobId, "align", "complete", `${words.length} words aligned`);
   } catch (err) {
     fail(jobId, "align", err);
+  }
+  if (aborted(jobId)) return finishStopped(jobId);
+
+  // --- Phase 4.5: Build + highlight captions --------------------------------------------------
+  // Subtitles are derived purely from the (silence-trimmed) alignment word
+  // timings, so the caption timeline maps 1:1 onto the preview/voiceover
+  // timeline. We chunk words into VEED-style phrase groups, then a cheap
+  // Gemini Flash pass marks the punchy word(s) in each group for emphasis.
+  // The user re-bolds/un-bolds and restyles in the editor afterward.
+  try {
+    setPhase(jobId, "caption", "running", "Building captions…");
+    const cached = await readJson<SubtitleState>(p.subtitles);
+    if (cached?.captions?.length) {
+      setPhase(jobId, "caption", "complete", `${cached.captions.length} captions (cached)`);
+    } else {
+      let captions = chunkCaptions(words);
+      try {
+        const hl = await highlightWords(captions, sigGetter() ?? undefined);
+        captions = hl.captions;
+        await updateSessionCosts(sessionId, (c) => addCaptionCost(c, hl.usage.inputTokens, hl.usage.outputTokens));
+      } catch (e) {
+        // Emphasis is a styling nicety — never fail the run over it.
+        console.warn("[pipeline] highlightWords failed; captions ship un-emphasized:", e);
+      }
+      const state: SubtitleState = { style: defaultSubtitleStyle(), captions };
+      await writeJson(p.subtitles, state);
+      setPhase(jobId, "caption", "complete", `${captions.length} captions`);
+    }
+  } catch (err) {
+    fail(jobId, "caption", err);
   }
   if (aborted(jobId)) return finishStopped(jobId);
 

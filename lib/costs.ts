@@ -93,6 +93,8 @@ export interface SessionCosts {
     describe: { calls: number; inputTokens: number; outputTokens: number; usd: number };
     match: { calls: number; inputTokens: number; outputTokens: number; usd: number };
     align: { calls: number; audioMs: number; usd: number };
+    /** Gemini 3.5 Flash call that picks the words to emphasize in captions. */
+    caption: { calls: number; inputTokens: number; outputTokens: number; usd: number };
   };
 }
 
@@ -103,6 +105,7 @@ export function emptyCosts(): SessionCosts {
       describe: { calls: 0, inputTokens: 0, outputTokens: 0, usd: 0 },
       match: { calls: 0, inputTokens: 0, outputTokens: 0, usd: 0 },
       align: { calls: 0, audioMs: 0, usd: 0 },
+      caption: { calls: 0, inputTokens: 0, outputTokens: 0, usd: 0 },
     },
   };
 }
@@ -130,6 +133,24 @@ export function addMatchCost(
   costs.breakdown.match.inputTokens += inputTokens;
   costs.breakdown.match.outputTokens += outputTokens;
   costs.breakdown.match.usd += usd;
+  costs.totalUsd += usd;
+}
+
+export function addCaptionCost(
+  costs: SessionCosts,
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  // Defensive: sessions whose costs were written before the caption phase
+  // existed won't have this breakdown bucket. Create it on first use.
+  if (!costs.breakdown.caption) {
+    costs.breakdown.caption = { calls: 0, inputTokens: 0, outputTokens: 0, usd: 0 };
+  }
+  const usd = geminiCost(MODEL_DESCRIBE, inputTokens, outputTokens);
+  costs.breakdown.caption.calls += 1;
+  costs.breakdown.caption.inputTokens += inputTokens;
+  costs.breakdown.caption.outputTokens += outputTokens;
+  costs.breakdown.caption.usd += usd;
   costs.totalUsd += usd;
 }
 

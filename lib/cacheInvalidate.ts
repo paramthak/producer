@@ -32,6 +32,10 @@ export async function invalidateVoiceoverDownstream(sessionId: string): Promise<
   await rmIfExists(p.alignment);
   await rmIfExists(p.sections);
   await rmIfExists(p.editPlan);
+  // Captions are derived from the alignment word timings — new audio means
+  // new words, so the cached captions (and any rendered subtitle videos) are
+  // stale.
+  await rmIfExists(p.subtitles);
   await deletePreviewMp4s(p.output);
   await clearManifestPreview(sessionId);
 }
@@ -45,6 +49,8 @@ export async function invalidateScriptDownstream(sessionId: string): Promise<voi
   const p = paths(sessionId);
   await rmIfExists(p.sections);
   await rmIfExists(p.editPlan);
+  // Script text drives caption chunking — retagging/editing lines re-chunks.
+  await rmIfExists(p.subtitles);
   await deletePreviewMp4s(p.output);
   await clearManifestPreview(sessionId);
 }
@@ -80,7 +86,8 @@ async function deletePreviewMp4s(outputDir: string): Promise<void> {
   }
   await Promise.all(
     entries
-      .filter((n) => n.endsWith(".mp4"))
+      // .mov = cached transparent subtitle-overlay intermediates.
+      .filter((n) => n.endsWith(".mp4") || n.endsWith(".mov"))
       .map((n) => fs.rm(path.join(outputDir, n), { force: true })),
   );
 }

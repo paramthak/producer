@@ -125,6 +125,9 @@ export async function predictBundleSize(opts: BundleOpts): Promise<number | null
     voiceoverChannels: opts.manifest.voiceover?.channels,
     clipNames,
     voiceoverName,
+    subtitleVideo: opts.subtitleVideoAbsPath
+      ? { name: SUBTITLE_ZIP_NAME, absPath: opts.subtitleVideoAbsPath, durationMs: opts.voiceoverDurationMs }
+      : undefined,
   });
   entries.push({
     name: `producer-${opts.sessionShort}.xml`,
@@ -158,6 +161,15 @@ export async function predictBundleSize(opts: BundleOpts): Promise<number | null
     }
   }
 
+  if (opts.subtitleVideoAbsPath) {
+    try {
+      const s = await stat(opts.subtitleVideoAbsPath);
+      entries.push({ name: SUBTITLE_ZIP_NAME, size: s.size });
+    } catch {
+      return null; // can't predict exactly if we promised subs but file is gone
+    }
+  }
+
   return predictStoreZipSize(entries);
 }
 
@@ -176,7 +188,16 @@ export interface BundleOpts {
    * the final cut locally without re-rendering.
    */
   previewMp4AbsPath?: string;
+  /**
+   * Optional absolute path to the rendered green-screen subtitles MP4. If
+   * present it's added to the ZIP as `subtitles.mp4` AND referenced by the
+   * XMEML on a top video track. Subtitles are never burned into the clips.
+   */
+  subtitleVideoAbsPath?: string;
 }
+
+/** Fixed ZIP/XML basename for the green-screen subtitle video. */
+const SUBTITLE_ZIP_NAME = "subtitles.mp4";
 
 /**
  * Build a Node Readable stream that emits a ZIP containing:
@@ -210,6 +231,7 @@ export async function buildBundleZip(opts: BundleOpts): Promise<Readable> {
     voiceoverAbsPath,
     voiceoverDurationMs,
     previewMp4AbsPath,
+    subtitleVideoAbsPath,
   } = opts;
 
   // Store mode (no compression). Bundle contents are 95%+ already-
@@ -244,6 +266,9 @@ export async function buildBundleZip(opts: BundleOpts): Promise<Readable> {
     voiceoverChannels: manifest.voiceover?.channels,
     clipNames,
     voiceoverName,
+    subtitleVideo: subtitleVideoAbsPath
+      ? { name: SUBTITLE_ZIP_NAME, absPath: subtitleVideoAbsPath, durationMs: voiceoverDurationMs }
+      : undefined,
   });
 
   // XML is already a buffer — straightforward append.
@@ -273,6 +298,13 @@ export async function buildBundleZip(opts: BundleOpts): Promise<Readable> {
       // Preview missing — skip silently. The XMEML doesn't reference
       // preview.mp4 so the bundle is still valid without it.
     }
+  }
+
+  if (subtitleVideoAbsPath) {
+    // The XMEML references subtitles.mp4 by this exact name on its top track,
+    // so it must be present for Premiere's relink-by-name to find it.
+    const buf = await readFile(subtitleVideoAbsPath);
+    archive.append(buf, { name: SUBTITLE_ZIP_NAME });
   }
 
   archive.finalize().catch(() => {

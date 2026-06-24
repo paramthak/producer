@@ -26,6 +26,7 @@
     "@radix-ui/react-separator": "^1.1.2",
     "@radix-ui/react-slot": "^1.1.2",
     "@radix-ui/react-tooltip": "^1.1.8",
+    "@resvg/resvg-js": "^2.6.2",
     "@types/archiver": "^6.0.4",
     "archiver": "^7.0.1",
     "class-variance-authority": "^0.7.1",

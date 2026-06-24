@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { paths, readJson } from "@/lib/session";
 import { loadManifest } from "@/lib/manifest";
+import { loadOrInitSubtitleState } from "@/lib/subtitlesStore";
 import type { EditPlan, SectionWindow, WordTimestamp } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -16,7 +17,10 @@ export async function GET(req: NextRequest) {
   if (!manifest || !plan || !sections || !alignment) {
     return NextResponse.json({ error: "Editor data not ready" }, { status: 404 });
   }
-  return NextResponse.json({ manifest, plan, sections, alignment });
+  // Subtitles derive from alignment, so they're always available here (lazily
+  // initialized for sessions made before the feature existed).
+  const subtitles = await loadOrInitSubtitleState(sessionId);
+  return NextResponse.json({ manifest, plan, sections, alignment, subtitles });
 }
 
 export async function PUT(req: NextRequest) {

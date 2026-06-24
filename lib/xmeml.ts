@@ -116,6 +116,14 @@ export function buildXmeml(opts: {
    * if the caller passes it through clip.filename style).
    */
   voiceoverName?: string;
+  /**
+   * Optional green-screen subtitle video. When provided it's placed on a
+   * SECOND video track ABOVE the main footage (V2 in Premiere) spanning the
+   * whole sequence, so the user can drop it on top and key out the green.
+   * Subtitles are NEVER burned into the source clips — this standalone
+   * green-screen file is the only place captions live in the bundle/XML.
+   */
+  subtitleVideo?: { name: string; absPath: string; durationMs: number };
 }): string {
   const {
     projectName,
@@ -127,6 +135,7 @@ export function buildXmeml(opts: {
     voiceoverChannels,
     clipNames,
     voiceoverName,
+    subtitleVideo,
   } = opts;
 
   // Resolve unique source files (one <file> def per clipId, reused by id).
@@ -311,6 +320,44 @@ ${voFileEl}
       : 0,
   );
 
+  // ---- Optional subtitle video on a SECOND (top) video track ----
+  // FCP7 XML stacks tracks bottom-up: the first <track> is V1, each later
+  // <track> sits above it. Emitting this after the footage track puts the
+  // green-screen captions on V2 — the top layer, as required.
+  let subtitleTrack = "";
+  if (subtitleVideo) {
+    const subFrames = Math.max(1, msToFrames(subtitleVideo.durationMs));
+    const subDir = path.dirname(subtitleVideo.absPath);
+    const subPathForUrl = path.join(subDir, subtitleVideo.name);
+    const subFileEl = buildFileElement(
+      "file-sub",
+      subtitleVideo.name,
+      fileUrl(subPathForUrl),
+      subFrames,
+      false, // not an image
+      true, // has video
+      false, // no audio
+      2, // unused (no audio)
+      "          ",
+    );
+    subtitleTrack = `
+        <track>
+          <clipitem id="ci-sub-1">
+            <name>${xmlEscape(subtitleVideo.name)}</name>
+            <enabled>TRUE</enabled>
+            <duration>${subFrames}</duration>
+${RATE.split("\n").map((l) => "    " + l).join("\n")}
+            <start>0</start>
+            <end>${subFrames}</end>
+            <in>0</in>
+            <out>${subFrames}</out>
+${subFileEl}
+          </clipitem>
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+        </track>`;
+  }
+
   // ---- Assemble the document ----
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE xmeml>
@@ -343,7 +390,7 @@ ${RATE}
 ${videoClipitems.join("\n")}
           <enabled>TRUE</enabled>
           <locked>FALSE</locked>
-        </track>
+        </track>${subtitleTrack}
       </video>
       <audio>
         <format>
