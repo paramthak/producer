@@ -40,37 +40,109 @@ export function disambiguateNames(clips: SourceClip[]): Record<string, string> {
 /**
  * Strip filename characters that break Premiere's XMEML name-relink.
  *
- * The failure mode this fixes: a clip whose original filename contains a
- * non-ASCII General Punctuation character (e.g. the horizontal ellipsis
- * `…` at U+2026, smart quotes, em-dash) makes Premiere silently fail the
- * ENTIRE XMEML import — not just that one clip. ZIP filename encoding +
- * macOS Finder's unzip + Premiere's name-relink form a fragile chain;
- * one byte-mismatch anywhere and the whole import goes blank with no
- * error dialog.
+ * Applies symmetrically to the ZIP entry, the XMEML `<name>`, and the
+ * XMEML `<pathurl>` basename — same sanitized string in all three places,
+ * so byte-mismatch on relink is impossible.
  *
- * Plain emoji (regional indicators, faces) round-trip cleanly in our
- * testing, so we keep those. The rule below: NFC-normalize, then keep
- * only letters/digits and a small whitelist of safe punctuation. Any
- * other codepoint becomes `_`. Symmetric — the same sanitized name is
- * used in the ZIP entry, the XMEML `<name>`, and the XMEML `<pathurl>`
- * basename, so byte mismatch is impossible.
+ * Failure modes this defends against (each observed in real downloads):
  *
- * Trailing/leading underscores from a run of replacements are collapsed
- * so we don't ship "Dublin_____202606081535.mp4" looking glitchy.
+ *   1. Non-ASCII General Punctuation (`…`, `"`, `"`, `—`, `–`) — Premiere
+ *      silently aborts the ENTIRE import, no error dialog.
+ *   2. Mid-name dots from URL-derived filenames (`pindown.io_x.mp4`,
+ *      `instagram.com_p_x.mp4`) — NLEs interpret `.io` / `.com` as the
+ *      extension and fail to find the media file. Same silent-import
+ *      result.
+ *   3. Filesystem-reserved chars (`:`, `\`, `/`, `|`, `?`, `*`, `<`, `>`,
+ *      `"`) — break ZIP extraction on Windows, mangle on macOS.
+ *   4. Zero-width / bidi control chars — invisible breakage of byte-match.
+ *   5. Leading `.` (hidden file on Unix), leading `-` (mistaken as CLI
+ *      flag by tooling), leading/trailing whitespace.
+ *   6. Windows reserved basenames (CON, PRN, AUX, NUL, COM1-9, LPT1-9).
+ *   7. Total length over ~200 bytes (some tooling chokes; ZIP central
+ *      directory tolerates 64K but downstream chains often don't).
+ *
+ * What we PRESERVE: letters/digits in any script, plain emoji (regional
+ * indicators, faces), spaces, and the safe-punctuation whitelist
+ * `_ - ( ) , &`. These all round-trip cleanly in our testing across
+ * archiver → macOS Finder → Premiere name-relink.
  */
 function sanitizeForNleRelink(filename: string): string {
   const ext = path.extname(filename);
-  const base = filename.slice(0, filename.length - ext.length);
-  const normalized = base.normalize("NFC");
-  const cleaned = normalized
-    // Keep letters/digits in any script (including emoji), spaces, and a
-    // small whitelist of punctuation that XMEML + macOS + Premiere all
-    // round-trip cleanly.
-    .replace(/[^\p{L}\p{N}\p{Emoji} ._\-(),&]+/gu, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_|_$/g, "");
-  const cleanedExt = ext.normalize("NFC").replace(/[^\p{L}\p{N}.]/gu, "");
-  return (cleaned || "clip") + cleanedExt;
+  let base = ext ? filename.slice(0, -ext.length) : filename;
+  let cleanedExt = ext;
+
+  // NFC: collapse decomposed combining marks back into precomposed
+  // characters so byte-match isn't broken by visually-identical strings.
+  base = base.normalize("NFC");
+  cleanedExt = cleanedExt.normalize("NFC");
+
+  // Strip zero-width and bidi controls — invisible in any editor, lethal
+  // for byte-match relink. Range covers ZWSP/ZWNJ/ZWJ/LRM/RLM/PDF/LRE/
+  // RLE/PDF/LRO/RLO/word-joiner/invisible-{times,separator,plus} + BOM.
+  const stripInvisibles = (s: string) =>
+    // eslint-disable-next-line no-misleading-character-class
+    s.replace(/[​-‏‪-‮⁠-⁤﻿]/g, "");
+  base = stripInvisibles(base);
+  cleanedExt = stripInvisibles(cleanedExt);
+
+  // Basename whitelist. NOTE — `.` is intentionally NOT here. Any dot
+  // inside the basename (e.g. `pindown.io_x`) gets folded to `_` so
+  // there is exactly one dot in the final filename: the one that
+  // introduces the extension.
+  base = base.replace(/[^\p{L}\p{N}\p{Emoji} _\-(),&]+/gu, "_");
+
+  // Collapse runs of separators introduced by the substitution above.
+  base = base.replace(/_+/g, "_").replace(/  +/g, " ");
+
+  // Trim leading/trailing separators incl. leading `.` (Unix hidden) and
+  // leading `-` (mistaken as a CLI flag by ffmpeg/zip/etc).
+  base = base.replace(/^[-._\s]+|[-._\s]+$/g, "");
+
+  // Extension: alphanumeric only, including the leading dot. Falls back
+  // to empty if extension was nothing but punctuation.
+  cleanedExt = cleanedExt.replace(/[^\p{L}\p{N}.]/gu, "");
+  if (cleanedExt === ".") cleanedExt = "";
+
+  // Windows reserved basenames — adding `clip_` prefix keeps the original
+  // base visible while making it safe to extract on any OS.
+  if (WINDOWS_RESERVED.has(base.toLowerCase())) base = `clip_${base}`;
+
+  if (!base) base = "clip";
+
+  // Cap the byte length so ZIP/manifest/downstream tooling doesn't trip
+  // on edge cases. Truncate the basename; append a short stable hash
+  // suffix so two long-and-similar names don't collide after the chop.
+  const totalBytes = Buffer.byteLength(base + cleanedExt, "utf8");
+  if (totalBytes > MAX_NAME_BYTES) {
+    const suffix = `_${fnv1aHex(filename)}`;
+    const headroom = MAX_NAME_BYTES - Buffer.byteLength(suffix + cleanedExt, "utf8");
+    while (Buffer.byteLength(base, "utf8") > headroom && base.length > 0) {
+      base = base.slice(0, -1);
+    }
+    base = base.replace(/[-._\s]+$/g, "") + suffix;
+  }
+
+  return base + cleanedExt;
+}
+
+/** ~200 byte ceiling on the final ZIP entry / XMEML `<name>` filename. */
+const MAX_NAME_BYTES = 200;
+
+/** Windows reserved device names — illegal as a *basename* on NTFS. */
+const WINDOWS_RESERVED = new Set<string>([
+  "con", "prn", "aux", "nul",
+  ...Array.from({ length: 9 }, (_, i) => `com${i + 1}`),
+  ...Array.from({ length: 9 }, (_, i) => `lpt${i + 1}`),
+]);
+
+/** Short stable suffix for collision-resistant filename truncation. */
+function fnv1aHex(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36).slice(0, 5).padStart(5, "0");
 }
 
 /**
