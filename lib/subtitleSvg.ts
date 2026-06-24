@@ -11,7 +11,7 @@
  */
 
 import type { Caption, SubtitleStyle } from "@/lib/types";
-import { PRESETS } from "@/lib/subtitles";
+import { PRESETS, cleanCaptionWord } from "@/lib/subtitles";
 
 const CANVAS_W = 1080;
 const CANVAS_H = 1920;
@@ -55,7 +55,12 @@ export function buildCaptionSvg(opts: BuildCaptionSvgOpts): string {
     opts.revealedCount === undefined
       ? caption.words.length
       : Math.max(0, Math.min(caption.words.length, opts.revealedCount));
-  const words = caption.words.slice(0, revealed);
+  // Clean each token for display (strip punctuation; keep contraction
+  // apostrophes/hyphens) and drop tokens that become empty.
+  const words = caption.words
+    .slice(0, revealed)
+    .map((w) => ({ text: cleanCaptionWord(w.text), bold: w.bold }))
+    .filter((w) => w.text.length > 0);
   if (!words.length) return buildEmptySvg(background);
 
   const baseFamily = style.fontFamily;

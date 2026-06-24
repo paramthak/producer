@@ -142,6 +142,28 @@ export const DEFAULT_CHUNK_OPTS: ChunkOpts = { maxChars: 22, maxWords: 5, pauseM
 
 const SENTENCE_END = /[.!?]$/;
 
+/**
+ * Clean a forced-alignment word token for DISPLAY in word-based subtitles.
+ * Alignment tokens carry punctuation ("months.", "Hi,", "FD.", "I'm",
+ * "parents'") that doesn't belong in clean single-word captions. Rule
+ * (per product decision): keep letters, numbers, and apostrophes/hyphens
+ * that sit *between* characters (contractions like "I'm", "well-known");
+ * strip everything else, including leading/trailing apostrophes/hyphens.
+ * Smart quotes are normalized to a straight apostrophe first.
+ *
+ * Applied at display time (overlay, script box, exports) — the stored
+ * alignment text is left intact so timing and re-chunking are unaffected.
+ * Returns "" for punctuation-only tokens (callers skip those).
+ */
+export function cleanCaptionWord(text: string): string {
+  return text
+    .normalize("NFC")
+    .replace(/[‘’]/g, "'") // ' ' → '
+    .replace(/[^\p{L}\p{N}'-]/gu, "") // keep letters, numbers, apostrophe, hyphen
+    .replace(/^['-]+/, "") // trim leading apostrophes/hyphens
+    .replace(/['-]+$/, ""); // trim trailing apostrophes/hyphens
+}
+
 export function chunkCaptions(
   words: WordTimestamp[],
   opts: ChunkOpts = DEFAULT_CHUNK_OPTS,

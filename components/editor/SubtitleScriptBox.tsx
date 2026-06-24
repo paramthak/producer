@@ -2,7 +2,7 @@
 import { useCallback, useRef } from "react";
 import { Bold, Captions, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { PRESETS, applyPreset, sortedCaptions } from "@/lib/subtitles";
+import { PRESETS, applyPreset, sortedCaptions, cleanCaptionWord } from "@/lib/subtitles";
 import {
   SUBTITLE_PRESETS,
   type Caption,
@@ -161,24 +161,29 @@ export function SubtitleScriptBox({ style, captions, onStyleChange, onCaptionsCh
           )}
           {ordered.map((c) => (
             <div key={c.id} className="rounded-md px-1.5 py-1 text-sm leading-relaxed hover:bg-muted/40">
-              {c.words.map((w, wi) => (
-                <span key={wi}>
-                  <span
-                    data-cap={c.id}
-                    data-word={wi}
-                    onClick={() => toggleWord(c.id, wi)}
-                    className={cn(
-                      "cursor-pointer rounded-sm px-0.5 transition-colors",
-                      w.bold
-                        ? "font-bold text-primary"
-                        : "text-foreground/85 hover:text-foreground",
-                    )}
-                  >
-                    {w.text}
+              {c.words.map((w, wi) => {
+                // Show the cleaned display form (same as the captions); skip
+                // tokens that clean to empty (pure punctuation).
+                const display = cleanCaptionWord(w.text);
+                if (!display) return null;
+                return (
+                  <span key={wi}>
+                    <span
+                      data-cap={c.id}
+                      data-word={wi}
+                      onClick={() => toggleWord(c.id, wi)}
+                      className={cn(
+                        "cursor-pointer rounded-sm px-0.5 transition-colors",
+                        w.bold
+                          ? "font-bold text-primary"
+                          : "text-foreground/85 hover:text-foreground",
+                      )}
+                    >
+                      {display}
+                    </span>{" "}
                   </span>
-                  {wi < c.words.length - 1 ? " " : ""}
-                </span>
-              ))}
+                );
+              })}
             </div>
           ))}
         </div>

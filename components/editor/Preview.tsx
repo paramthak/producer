@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, Pause, Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { formatDuration } from "@/lib/utils";
-import { SubtitleLayer } from "@/components/editor/SubtitleLayer";
+import { SubtitleOverlay, SubtitleToolbar, type SubtitleTarget } from "@/components/editor/SubtitleLayer";
 import type { Caption, EditPlan, SubtitleStyle } from "@/lib/types";
 
 interface Props {
@@ -71,6 +71,10 @@ export function Preview({
   const [currentMs, setCurrentMs] = useState(0);
   const [activeId, setActiveId] = useState<string | null>(null);
   const rafRef = useRef<number | null>(null);
+  // Subtitle editing: whether the caption is selected (shows the toolbar
+  // below the frame) and which text the toolbar styles.
+  const [subSelected, setSubSelected] = useState(false);
+  const [subTarget, setSubTarget] = useState<SubtitleTarget>("normal");
 
   // Apply external seek requests (clicking a segment chip in the Timeline).
   useEffect(() => {
@@ -155,11 +159,13 @@ export function Preview({
 
         {/* Live caption overlay — same SVG markup as the export (parity). */}
         {!showEmptyState && subtitleStyle && captions && captions.length > 0 && (
-          <SubtitleLayer
+          <SubtitleOverlay
             currentMs={currentMs}
             captions={captions}
             style={subtitleStyle}
             editable={!isRendering}
+            selected={subSelected}
+            onToggleSelect={() => setSubSelected((s) => !s)}
             onChange={(s) => onSubtitleStyleChange?.(s)}
           />
         )}
@@ -214,6 +220,17 @@ export function Preview({
           </div>
         )}
       </div>
+
+      {/* Caption style toolbar — BELOW the frame (never clipped by the
+          frame's overflow-hidden), appears when the caption is selected. */}
+      {!showEmptyState && subtitleStyle?.enabled && captions && captions.length > 0 && subSelected && (
+        <SubtitleToolbar
+          style={subtitleStyle}
+          target={subTarget}
+          onTargetChange={setSubTarget}
+          onChange={(s) => onSubtitleStyleChange?.(s)}
+        />
+      )}
     </div>
   );
 }
