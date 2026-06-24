@@ -204,9 +204,14 @@ export async function predictBundleSize(opts: BundleOpts): Promise<number | null
     voiceoverChannels: opts.manifest.voiceover?.channels,
     clipNames,
     voiceoverName,
-    subtitleVideo: opts.subtitleVideoAbsPath
-      ? { name: SUBTITLE_ZIP_NAME, absPath: opts.subtitleVideoAbsPath, durationMs: opts.voiceoverDurationMs }
-      : undefined,
+    // Gated off — see EMIT_SUBTITLE_OVERLAY_IN_XMEML. subtitles.mp4 still
+    // lands in the ZIP via the explicit append below buildBundleZip; we
+    // just stop referencing it on a stacked overlay track that Premiere
+    // can't parse.
+    subtitleVideo:
+      EMIT_SUBTITLE_OVERLAY_IN_XMEML && opts.subtitleVideoAbsPath
+        ? { name: SUBTITLE_ZIP_NAME, absPath: opts.subtitleVideoAbsPath, durationMs: opts.voiceoverDurationMs }
+        : undefined,
   });
   entries.push({
     name: `producer-${opts.sessionShort}.xml`,
@@ -286,6 +291,34 @@ export interface BundleOpts {
 const SUBTITLE_ZIP_NAME = "subtitles.mp4";
 
 /**
+ * Whether to reference subtitles.mp4 as a stacked overlay track (V2) inside
+ * the XMEML's `<video>` element.
+ *
+ * Currently FALSE. The XMEML emitted with a stacked overlay track triggers
+ * Premiere Pro 2024–2026's documented silent-import-fail: progress bar
+ * flashes, project goes blank, no error dialog. The overlay clipitem is
+ * structurally valid per Apple's FCP7 XMEML v5 DTD — Premiere's parser
+ * simply doesn't degrade gracefully when it dislikes anything about an
+ * overlay track. DaVinci Resolve and Avid import the same XMEML cleanly;
+ * it's Premiere-specific. See context.md §17 / the recent failing
+ * mkgj8u.xml session for the smoking gun (every filename was correct;
+ * only the overlay track was different from a previously-working XMEML).
+ *
+ * What this constant controls:
+ *   - true  → emit a second `<track>` referencing subtitles.mp4 (V2 in
+ *             Premiere). Today this breaks Premiere import.
+ *   - false → don't reference subtitles.mp4 in the XMEML at all. The
+ *             file still ships in the ZIP, so the user opens the
+ *             unzipped folder and drags subtitles.mp4 onto V2 manually.
+ *             One drag; Premiere import never breaks.
+ *
+ * Flip back to true if/when Adobe ships a Premiere build with a robust
+ * XMEML overlay-track parser. Until then, manual drag is strictly better
+ * than silent-fail.
+ */
+const EMIT_SUBTITLE_OVERLAY_IN_XMEML = false;
+
+/**
  * Build a Node Readable stream that emits a ZIP containing:
  *   - producer-<sessionShort>.xml     (XMEML)
  *   - <originalFilename>              (each source clip)
@@ -356,9 +389,13 @@ export async function buildBundleZip(opts: BundleOpts): Promise<Readable> {
     voiceoverChannels: manifest.voiceover?.channels,
     clipNames,
     voiceoverName,
-    subtitleVideo: subtitleVideoAbsPath
-      ? { name: SUBTITLE_ZIP_NAME, absPath: subtitleVideoAbsPath, durationMs: voiceoverDurationMs }
-      : undefined,
+    // Gated off — see EMIT_SUBTITLE_OVERLAY_IN_XMEML. subtitles.mp4 still
+    // ships in the ZIP via the explicit append below; we just stop
+    // referencing it as a stacked overlay track that Premiere can't parse.
+    subtitleVideo:
+      EMIT_SUBTITLE_OVERLAY_IN_XMEML && subtitleVideoAbsPath
+        ? { name: SUBTITLE_ZIP_NAME, absPath: subtitleVideoAbsPath, durationMs: voiceoverDurationMs }
+        : undefined,
   });
 
   // XML is already a buffer — straightforward append.
