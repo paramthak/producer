@@ -46,7 +46,7 @@ import {
 import { formatDuration } from "@/lib/utils";
 
 type Mode = "setup" | "edit";
-type ExportKind = "mp4" | "xml" | "bundle";
+type ExportKind = "mp4" | "bundle";
 
 interface EditorData {
   manifest: {
@@ -498,9 +498,7 @@ export default function StudioPage() {
       const message =
         kind === "mp4"
           ? "Downloaded MP4"
-          : kind === "xml"
-            ? "Downloaded XML — open in Premiere / Resolve / FCP"
-            : "Downloaded project bundle — unzip and open the .xml in Premiere / Resolve / FCP";
+          : "Downloaded project bundle — unzip and open the .xml in Premiere / Resolve / FCP";
       toast.success(message);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Export failed");
@@ -536,16 +534,6 @@ export default function StudioPage() {
                   totalUsd={editor.manifest.costs?.totalUsd ?? 0}
                   breakdown={editor.manifest.costs?.breakdown}
                 />
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => exportFile("xml")}
-                  disabled={exporting !== "none"}
-                  title="Download just the XML (you'll need to relink media manually)"
-                >
-                  {exporting === "xml" ? <Loader2 className="size-4 animate-spin" /> : <FileVideo className="size-4" />}
-                  XML only
-                </Button>
                 <Button
                   variant="outline"
                   onClick={() => setBundleConfirmOpen(true)}
