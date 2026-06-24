@@ -594,7 +594,7 @@ preview.mp4                      ← rendered preview (optional)
 
 `disambiguateNames(clips)` is the single source of truth for clip naming — used by *both* the XML's `<name>`/`<pathurl>` basenames and the actual filenames inside the ZIP. Premiere falls back to name-matching when the absolute `<pathurl>` doesn't resolve, and because the names match, every clip relinks with zero prompts.
 
-### Three subtle traps, three deliberate fixes
+### Four subtle traps, four deliberate fixes
 
 **Trap 1 — `Content-Length` mismatch.** Early version sent no Content-Length, so the frontend's progress bar defaulted to a placeholder fill and looked stuck at ~30%. Fix: `predictBundleSize()` walks the entries and returns the exact byte count using the store-mode layout formula:
 
@@ -630,6 +630,35 @@ Repro verified against archiver itself: stream-append → `extended local header
 
 **`buildBundleZip` is now `async` and returns `Promise<Readable>`** because the buffer reads have to happen before/during `archive.finalize()`. The bundle route awaits it.
 
+**Trap 4 — filenames from the wild break Premiere's name-relink.** Source clips arrive from every download convention humans have invented: Pinterest/Klickpin (`From Klickpin.com- 7177680650167587-pin-id-7177680650167587.mp4`), AI generators (`magnific_create-a-realistic-emotional-airport-farewell-vide_veo3_1_720p_9-16_24fps_96559.mp4`), Instagram/TikTok savers (`instagram.com_p_xyz.mp4`), iPhone screen recordings with literal `12.34.56` timestamps, autocorrected smart quotes / em-dashes, ElevenLabs ISO timestamps, the works. Premiere's name-relink is exact byte-match; **one weird character anywhere and the entire XMEML import silently aborts** — progress bar flashes, project goes blank, no error dialog.
+
+Two real reproductions we hit and fixed:
+- Commit `c460d42`: a `…` (U+2026 horizontal ellipsis) in `Dublin_riverside_skyline_archite…_202606081535.mp4` killed the import. Fixed: NFC-normalize + fold non-ASCII General Punctuation.
+- Commit `c89cd2e`: a mid-name `.io` / `.com` in `pindown.io_x.mp4` / `Klickpin.com- xxx.mp4` made Premiere parse `.io` as the extension and fail relink. Fixed: hardened the sanitizer — see rules below.
+
+The sanitizer lives in `lib/zipBundle.ts:sanitizeForNleRelink` and runs inside `disambiguateNames` (which is the single source of truth for clip naming — same string used as the ZIP entry name, the XMEML `<name>`, and the basename of `<pathurl>`, so byte mismatch is impossible).
+
+Current rules (as of `c89cd2e`):
+
+1. **NFC-normalize** the basename and extension separately. Stops decomposed combining marks from breaking byte-match.
+2. **Strip zero-width and bidi control chars** (`U+200B`–`U+200F`, `U+202A`–`U+202E`, `U+2060`–`U+2064`, `U+FEFF`). Invisible in editors, lethal for relink.
+3. **Whitelist the basename**: keep only letters, digits, emoji, space, and `_ - ( ) , &`. Everything else (including dots, smart quotes, em-dash, ellipsis) → `_`. Mid-name dots are the most important class — fold them so the only dot in the final filename is the extension separator.
+4. **Filesystem-reserved chars** (`:` `\` `/` `|` `?` `*` `<` `>` `"`) get folded too. We don't usually see these (macOS converts on save), but defense in depth.
+5. **Collapse** `_+` → `_` and `  +` → ` `. Trim leading/trailing `-`, `.`, `_`, whitespace.
+6. **Extension regex** keeps only letters/digits and the leading dot. Empty extension after this → drop the trailing dot.
+7. **Windows reserved basenames** (CON, PRN, AUX, NUL, COM1–9, LPT1–9, case-insensitive) get a `clip_` prefix so they're safe to extract on any OS.
+8. **200-byte UTF-8 cap.** Truncate basename, keep extension, append a stable 5-char FNV-1a suffix derived from the original filename so two long similar names don't collide post-truncation.
+9. **Empty after sanitize** → fall back to `clip.<ext>` (e.g., `….mp4` → `clip.mp4`).
+
+Verified against 29 representative real-world filenames including the three failing ones — zero regressions on the 18 previously-working samples (emoji, parens, commas, ampersands, spaces, ISO timestamps).
+
+**Phase 2 and 3 — deferred but planned.** The current fix runs at *export time* inside `disambiguateNames`. That keeps the manifest schema untouched and works for every existing session, but it does have rough edges:
+
+- **Phase 2 (deferred)** — *sanitize at upload time*. `SourceClip` grows a `safeName: string` next to `filename: string`. `app/api/upload/route.ts` computes `safeName = sanitize(originalFilename)` once on upload; manifest stores both. UI shows `filename` (original, friendly); every XMEML/ZIP path uses `safeName`. Collision disambiguation (`(2)`, `(3)`) then runs against `safeName`s only, so the `(n)` suffixes are stable across re-exports of the same session. Backwards-compat: any clip missing `safeName` derives it lazily on load.
+- **Phase 3 (deferred)** — *golden fixture + boundary asserts*. A `lib/__tests__/sanitize.fixture.ts` with 40+ real-world filename samples → expected outputs, run on every typecheck. Plus a sanity check inside `buildXmeml` and `buildBundleZip` that fails loud (rather than silently shipping a half-broken XMEML) if any name they consume contains a banned char.
+
+Why deferred: Phase 1 is enough to fix everything we've seen in production. Phases 2 and 3 are "do this when filename bugs reappear, not on speculation." Phase 1 already covers the failure modes we've observed across Pinterest, Klickpin, AI generators, ElevenLabs, iPhone, browser duplicates, smart-text-autocorrected, and zero-width-injected names. If a new failure class shows up that the export-time sanitizer can't handle (e.g., the disk filename itself is broken before we ever read the manifest), that's the trigger to escalate to Phase 2.
+
 ### `nodeStreamToWebStream` — why we don't use `Readable.toWeb()`
 [lib/streamHelpers.ts](lib/streamHelpers.ts). `Readable.toWeb` has a known race: when the HTTP client disconnects, the Web `ReadableStream` controller gets closed by Next.js's Response runtime, but Node's internal `Readable` can still emit one more chunk in flight. That chunk calls `controller.enqueue()` on a closed controller and throws `ERR_INVALID_STATE` from a microtask — uncatchable from userland, fatal under Next's `uncaughtException` handler. We saw this fire on every `<video>` Range request and every MP4 export, causing container restarts.
 
@@ -654,6 +683,7 @@ Things that are true and must stay true:
 9. **`Content-Length` on `/api/export/bundle` is exact.** Don't drop it — the download progress bar relies on it.
 10. **Every input-mutating route fires the matching cache-invalidate helper.** Voiceover upload → `invalidateVoiceoverDownstream`. Script PATCH → `invalidateScriptDownstream`. Clip POST/DELETE → `invalidateClipsDownstream`. Without these, stale derivatives leak into the next pipeline run.
 11. **`renderPreviewForSession` re-reads the manifest from disk** before merging the preview metadata. Don't replace it with an in-memory spread; you'll obliterate the cost writes done by earlier phases.
+12. **All clip/voiceover filenames pass through `sanitizeForNleRelink` before they hit the ZIP, the XMEML `<name>`, or the XMEML `<pathurl>` basename.** `disambiguateNames` is the single chokepoint — keep it that way. Any new export path that builds filenames must route through it or duplicate the rules verbatim. See §17 Trap 4.
 
 ---
 
@@ -682,6 +712,8 @@ Things that are true and must stay true:
 - Bundle ffmpeg via `@ffmpeg-installer/ffmpeg`. That npm package's binaries are old, slow, and miss filters. Use the system ffmpeg.
 - Reintroduce `createReadStream` in `lib/zipBundle.ts`. See §17.
 - Drop the `Content-Length` header from `/api/export/bundle`.
+- Bypass `sanitizeForNleRelink` / `disambiguateNames` when building XMEML or ZIP names. Even "obviously safe" filenames have bitten us — keep the single chokepoint.
+- Allow a dot inside the basename in any export-path filename. The mid-name dot was the Pinterest/Klickpin/Instagram silent-fail. The sanitizer folds them to `_`; don't add a code path that skips that step.
 - Remove a cache-invalidate call from an input-mutating route.
 - Lower `FRAME_FPS` back to 2. Rule 0 needs the resolution.
 - Spread an in-memory manifest snapshot into a `saveManifest()` after cost-writing phases have run. Always re-read the on-disk manifest first.
