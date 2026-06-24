@@ -8,6 +8,7 @@ import { ensureSession, paths, mediaUrl } from "@/lib/session";
 import { loadManifest, saveManifest } from "@/lib/manifest";
 import { probe, probeAudioDurationMs } from "@/lib/ffmpeg";
 import { invalidateClipsDownstream, invalidateVoiceoverDownstream } from "@/lib/cacheInvalidate";
+import { sanitizeForNleRelink } from "@/lib/zipBundle";
 import { AUTH_COOKIE, AUTH_COOKIE_VALUE } from "@/lib/auth";
 import {
   AUDIO_EXTS,
@@ -196,6 +197,9 @@ export async function POST(req: NextRequest) {
     const stats = await fs.stat(abs);
     manifest.voiceover = {
       filename,
+      // Phase 2: canonical NLE-safe name computed once at upload time.
+      // Every export path reads this verbatim instead of re-deriving.
+      safeName: sanitizeForNleRelink(filename),
       relPath: rel,
       url: mediaUrl(sessionId, rel),
       sizeBytes: stats.size,
@@ -247,6 +251,11 @@ export async function POST(req: NextRequest) {
     section: section!,
     kind: clipKind!,
     filename,
+    // Phase 2: canonical NLE-safe name computed once at upload time.
+    // Every export path (XMEML <name>, ZIP entry, <pathurl> basename)
+    // reads this verbatim instead of re-deriving it — so a future code
+    // path that bypasses disambiguateNames still gets the safe name.
+    safeName: sanitizeForNleRelink(filename),
     relPath: rel,
     url: mediaUrl(sessionId, rel),
     durationMs,

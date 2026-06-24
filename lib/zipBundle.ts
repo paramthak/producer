@@ -23,7 +23,10 @@ export function disambiguateNames(clips: SourceClip[]): Record<string, string> {
   const result: Record<string, string> = {};
   const used = new Set<string>();
   for (const c of clips) {
-    let name = sanitizeForNleRelink(c.filename);
+    // Phase 2: prefer the canonical safeName stored on the manifest at
+    // upload time. Fall back to sanitizing the original filename on the
+    // fly for legacy manifests written before this field existed.
+    let name = c.safeName ?? sanitizeForNleRelink(c.filename);
     if (used.has(name.toLowerCase())) {
       const ext = path.extname(name);
       const base = name.slice(0, name.length - ext.length);
@@ -66,7 +69,7 @@ export function disambiguateNames(clips: SourceClip[]): Record<string, string> {
  * `_ - ( ) , &`. These all round-trip cleanly in our testing across
  * archiver → macOS Finder → Premiere name-relink.
  */
-function sanitizeForNleRelink(filename: string): string {
+export function sanitizeForNleRelink(filename: string): string {
   const ext = path.extname(filename);
   let base = ext ? filename.slice(0, -ext.length) : filename;
   let cleanedExt = ext;
@@ -181,9 +184,11 @@ export function predictStoreZipSize(
  */
 export async function predictBundleSize(opts: BundleOpts): Promise<number | null> {
   const clipNames = disambiguateNames(opts.manifest.clips);
-  const voiceoverName = sanitizeForNleRelink(
-    opts.manifest.voiceover?.filename ?? "voiceover.mp3",
-  );
+  // Phase 2: prefer the manifest's canonical safeName when present, fall
+  // back to sanitizing the original filename for legacy manifests.
+  const voiceoverName =
+    opts.manifest.voiceover?.safeName ??
+    sanitizeForNleRelink(opts.manifest.voiceover?.filename ?? "voiceover.mp3");
   const entries: Array<{ name: string; size: number }> = [];
 
   // All entries are buffer-appended (see buildBundleZip), so all entries
@@ -220,7 +225,14 @@ export async function predictBundleSize(opts: BundleOpts): Promise<number | null
     if (!abs) continue;
     try {
       const s = await stat(abs);
-      entries.push({ name: clipNames[clip.id] ?? clip.filename, size: s.size });
+      // disambiguateNames produces an entry for every clip.id, so the
+      // fallback chain below only fires if a future code path adds a
+      // clip outside that loop. Prefer the manifest-stored safeName
+      // before falling back to the raw filename.
+      entries.push({
+        name: clipNames[clip.id] ?? clip.safeName ?? clip.filename,
+        size: s.size,
+      });
     } catch {
       return null;
     }
@@ -328,9 +340,11 @@ export async function buildBundleZip(opts: BundleOpts): Promise<Readable> {
   });
 
   const clipNames = disambiguateNames(manifest.clips);
-  const voiceoverName = sanitizeForNleRelink(
-    manifest.voiceover?.filename ?? "voiceover.mp3",
-  );
+  // Phase 2: prefer the manifest's canonical safeName when present, fall
+  // back to sanitizing the original filename for legacy manifests.
+  const voiceoverName =
+    manifest.voiceover?.safeName ??
+    sanitizeForNleRelink(manifest.voiceover?.filename ?? "voiceover.mp3");
 
   const xml = buildXmeml({
     projectName,
@@ -361,7 +375,10 @@ export async function buildBundleZip(opts: BundleOpts): Promise<Readable> {
   for (const clip of manifest.clips) {
     const abs = clipAbsPath[clip.id];
     if (!abs) continue;
-    const cleanName = clipNames[clip.id] ?? clip.filename;
+    // Same fallback chain as in predictBundleSize: prefer disambiguated
+    // (collision-aware) name, then the upload-time canonical safeName,
+    // then raw filename as a last resort.
+    const cleanName = clipNames[clip.id] ?? clip.safeName ?? clip.filename;
     const buf = await readFile(abs);
     archive.append(buf, { name: cleanName });
   }

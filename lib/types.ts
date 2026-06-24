@@ -27,7 +27,22 @@ export interface SourceClip {
   id: string;
   section: SectionId;
   kind: ClipKind;
+  /**
+   * Original filename as uploaded — kept verbatim for UI display and as
+   * the source of truth for debugging. Never touched by exports; if you
+   * need a name that's safe for ZIP entries / XMEML <name> / NLE relink,
+   * use `safeName` (or `disambiguateNames(...)` for collision handling).
+   */
   filename: string;
+  /**
+   * Filename sanitized at upload time via sanitizeForNleRelink. Stored
+   * here so every export path reads the same canonical value instead of
+   * re-deriving it (which historically caused divergence between routes —
+   * see context.md §17 Trap 4). Optional for back-compat with manifests
+   * written before this field existed; export-time helpers fall back to
+   * sanitizing `filename` on the fly when missing.
+   */
+  safeName?: string;
   /** Path under .producer-data/{session}/sources/, relative to session root. */
   relPath: string;
   /** Public URL the browser can fetch (via /api/media). */

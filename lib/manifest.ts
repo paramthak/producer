@@ -9,7 +9,14 @@ export interface SessionManifest {
   createdAt: number;
   clips: SourceClip[];
   voiceover: {
+    /** Original filename as uploaded — kept verbatim for UI display. */
     filename: string;
+    /**
+     * Sanitized filename used by exports (XMEML <name>, ZIP entry).
+     * Optional for back-compat; export helpers fall back to sanitizing
+     * `filename` on the fly when missing. See SourceClip.safeName.
+     */
+    safeName?: string;
     relPath: string;
     url: string;
     sizeBytes: number;
