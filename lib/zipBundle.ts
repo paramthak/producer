@@ -181,7 +181,9 @@ export function predictStoreZipSize(
  */
 export async function predictBundleSize(opts: BundleOpts): Promise<number | null> {
   const clipNames = disambiguateNames(opts.manifest.clips);
-  const voiceoverName = opts.manifest.voiceover?.filename ?? "voiceover.mp3";
+  const voiceoverName = sanitizeForNleRelink(
+    opts.manifest.voiceover?.filename ?? "voiceover.mp3",
+  );
   const entries: Array<{ name: string; size: number }> = [];
 
   // All entries are buffer-appended (see buildBundleZip), so all entries
@@ -326,7 +328,9 @@ export async function buildBundleZip(opts: BundleOpts): Promise<Readable> {
   });
 
   const clipNames = disambiguateNames(manifest.clips);
-  const voiceoverName = manifest.voiceover?.filename ?? "voiceover.mp3";
+  const voiceoverName = sanitizeForNleRelink(
+    manifest.voiceover?.filename ?? "voiceover.mp3",
+  );
 
   const xml = buildXmeml({
     projectName,
