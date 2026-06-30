@@ -23,7 +23,22 @@ const POS_MIN = 0.08;
 const POS_MAX = 0.94;
 
 /** Quick colour presets shown alongside the native picker. */
-const SWATCHES = ["#FFFFFF", "#F5F0DC", "#E9FF12", "#FFD60A", "#FF4D4D", "#00E5FF", "#000000"];
+const SWATCHES = [
+  // neutrals
+  "#FFFFFF", "#F5F0DC", "#F2E9D0", "#C9C9C9", "#1A1612", "#000000",
+  // yellows / golds
+  "#E9FF12", "#FFD60A", "#F5A623", "#D97706",
+  // reds / pinks
+  "#FF4D4D", "#E5484D", "#FF6B9D", "#FF2D87",
+  // greens
+  "#00B140", "#15803D", "#7CFC00", "#A7F3D0",
+  // blues / cyans
+  "#00E5FF", "#0EA5E9", "#2563EB", "#1E3A8A",
+  // purples
+  "#A855F7", "#7C3AED", "#C4B5FD",
+  // warm accents
+  "#0F766E", "#FB923C",
+];
 
 /* ============================== OVERLAY ============================== */
 

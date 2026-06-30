@@ -19,6 +19,7 @@ export function paths(sessionId: string) {
   return {
     base,
     sources: path.join(base, "sources"),
+    proxies: path.join(base, "proxies"),
     frames: path.join(base, "frames"),
     descriptions: path.join(base, "descriptions"),
     voiceover: path.join(base, "voiceover"),

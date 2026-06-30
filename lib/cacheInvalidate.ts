@@ -1,7 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { paths } from "@/lib/session";
-import { loadManifest, saveManifest } from "@/lib/manifest";
 
 /**
  * Cache invalidation for the per-session derived data on disk.
@@ -13,8 +12,7 @@ import { loadManifest, saveManifest } from "@/lib/manifest";
  *   alignment.json   ← depends on the voiceover audio file content
  *   sections.json    ← depends on alignment.json AND the tagged script
  *   edit-plan.json   ← depends on sections.json AND clips AND match output
- *   output/*.mp4     ← depends on edit-plan.json AND the voiceover file
- *   manifest.preview ← pointer to the most-recent output/*.mp4
+ *   output/*.mp4     ← rendered reels, keyed by plan hash
  *
  * Without these helpers, the pipeline would happily reuse stale cached
  * data when an input changed — the user would replace their voiceover,
@@ -37,7 +35,6 @@ export async function invalidateVoiceoverDownstream(sessionId: string): Promise<
   // stale.
   await rmIfExists(p.subtitles);
   await deletePreviewMp4s(p.output);
-  await clearManifestPreview(sessionId);
 }
 
 /**
@@ -52,7 +49,6 @@ export async function invalidateScriptDownstream(sessionId: string): Promise<voi
   // Script text drives caption chunking — retagging/editing lines re-chunks.
   await rmIfExists(p.subtitles);
   await deletePreviewMp4s(p.output);
-  await clearManifestPreview(sessionId);
 }
 
 /**
@@ -66,7 +62,6 @@ export async function invalidateClipsDownstream(sessionId: string): Promise<void
   const p = paths(sessionId);
   await rmIfExists(p.editPlan);
   await deletePreviewMp4s(p.output);
-  await clearManifestPreview(sessionId);
 }
 
 async function rmIfExists(p: string): Promise<void> {
@@ -90,12 +85,4 @@ async function deletePreviewMp4s(outputDir: string): Promise<void> {
       .filter((n) => n.endsWith(".mp4") || n.endsWith(".mov"))
       .map((n) => fs.rm(path.join(outputDir, n), { force: true })),
   );
-}
-
-async function clearManifestPreview(sessionId: string): Promise<void> {
-  const m = await loadManifest(sessionId);
-  if (!m || !m.preview) return;
-  const next = { ...m };
-  delete next.preview;
-  await saveManifest(next);
 }

@@ -7,8 +7,8 @@ import { nanoid } from "nanoid";
 import { ensureSession, paths, mediaUrl } from "@/lib/session";
 import { loadManifest, saveManifest } from "@/lib/manifest";
 import { probe, probeAudioDurationMs } from "@/lib/ffmpeg";
+import { queueClipProxy } from "@/lib/proxy";
 import { invalidateClipsDownstream, invalidateVoiceoverDownstream } from "@/lib/cacheInvalidate";
-import { sanitizeForNleRelink } from "@/lib/zipBundle";
 import { AUTH_COOKIE, AUTH_COOKIE_VALUE } from "@/lib/auth";
 import {
   AUDIO_EXTS,
@@ -197,9 +197,6 @@ export async function POST(req: NextRequest) {
     const stats = await fs.stat(abs);
     manifest.voiceover = {
       filename,
-      // Phase 2: canonical NLE-safe name computed once at upload time.
-      // Every export path reads this verbatim instead of re-deriving.
-      safeName: sanitizeForNleRelink(filename),
       relPath: rel,
       url: mediaUrl(sessionId, rel),
       sizeBytes: stats.size,
@@ -251,11 +248,6 @@ export async function POST(req: NextRequest) {
     section: section!,
     kind: clipKind!,
     filename,
-    // Phase 2: canonical NLE-safe name computed once at upload time.
-    // Every export path (XMEML <name>, ZIP entry, <pathurl> basename)
-    // reads this verbatim instead of re-deriving it — so a future code
-    // path that bypasses disambiguateNames still gets the safe name.
-    safeName: sanitizeForNleRelink(filename),
     relPath: rel,
     url: mediaUrl(sessionId, rel),
     durationMs,
@@ -265,6 +257,11 @@ export async function POST(req: NextRequest) {
     sizeBytes: stats.size,
     hasAudio,
     audioChannels,
+    // Images are usable immediately (small still); the poster IS the source.
+    // Videos transcode a proxy + poster async (queued below) — proxyReady
+    // flips true on completion.
+    proxyReady: clipKind === "image",
+    posterRelPath: clipKind === "image" ? rel : undefined,
   };
   manifest.clips.push(clip);
   await saveManifest(manifest);
@@ -272,6 +269,10 @@ export async function POST(req: NextRequest) {
   // was computed without this clip, so it's stale. Frames/descriptions
   // of OTHER clips remain valid.
   await invalidateClipsDownstream(sessionId).catch(() => {});
+
+  // Kick off the low-res proxy + poster transcode (fire-and-forget). The
+  // client polls the manifest for proxyReady before enabling timeline drag.
+  if (clipKind === "video") queueClipProxy(sessionId, id);
 
   return NextResponse.json({ sessionId, clip });
 }

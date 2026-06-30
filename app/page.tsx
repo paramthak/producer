@@ -3,14 +3,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
+  Captions,
   Download,
-  FileArchive,
   FileVideo,
   Loader2,
   Plus,
+  Redo2,
   RotateCw,
   Sparkles,
   Square,
+  Undo2,
   Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -26,13 +28,14 @@ import { PhaseStrip } from "@/components/processing/PhaseStrip";
 import { ElapsedTimer } from "@/components/processing/ElapsedTimer";
 import { Preview } from "@/components/editor/Preview";
 import { Timeline } from "@/components/editor/Timeline";
-import { DownloadProgress, type DownloadState } from "@/components/editor/DownloadProgress";
 import { SubtitleScriptBox } from "@/components/editor/SubtitleScriptBox";
-import { resetSession, useSessionManifest } from "@/lib/builderStore";
-import { hashPlan } from "@/lib/planHash";
+import { resetSession, uploadClip, useSessionManifest } from "@/lib/builderStore";
+import { applySplit, applyDelete, addFromLibrary } from "@/lib/planEdit";
 import {
   PHASE_LABEL,
   SECTIONS,
+  SECTION_LABEL,
+  SECTION_DOT_VAR,
   type Caption,
   type EditPlan,
   type JobState,
@@ -43,10 +46,10 @@ import {
   type SubtitleStyle,
   type WordTimestamp,
 } from "@/lib/types";
-import { formatDuration } from "@/lib/utils";
+import { cn, formatDuration } from "@/lib/utils";
 
 type Mode = "setup" | "edit";
-type ExportKind = "mp4" | "bundle";
+type ExportKind = "mp4";
 
 interface EditorData {
   manifest: {
@@ -54,11 +57,6 @@ interface EditorData {
     clips: SourceClip[];
     voiceover: { filename: string; relPath: string; url: string; sizeBytes: number } | null;
     overridePrompt: string;
-    preview?: {
-      filename: string;
-      planHash: string;
-      renderedAt: number;
-    };
     costs?: {
       totalUsd: number;
       breakdown: {
@@ -88,38 +86,19 @@ export default function StudioPage() {
   const [overridePrompt, setOverridePrompt] = useState("");
   const [exporting, setExporting] = useState<"none" | ExportKind>("none");
   const [mp4ModalOpen, setMp4ModalOpen] = useState(false);
+  const [generatingSubs, setGeneratingSubs] = useState(false);
   const [seekReq, setSeekReq] = useState<{ ms: number; nonce: number } | null>(null);
   const [currentMs, setCurrentMs] = useState(0);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
-  // Render-only job (re-render preview MP4 after editing). Subscribed to the
-  // same /api/job/[id] SSE stream as the main pipeline; on complete we
-  // refetch the editor bundle so manifest.preview reflects the new render.
-  const [renderJobId, setRenderJobId] = useState<string | null>(null);
-  // Bundle download is a long-running streamed operation — needs its own
-  // confirm dialog AND a progress modal that surfaces real bytes-received
-  // counts and any error mid-stream.
-  const [bundleConfirmOpen, setBundleConfirmOpen] = useState(false);
-  const [downloadState, setDownloadState] = useState<DownloadState>({
-    stage: "idle",
-    receivedBytes: 0,
-    totalBytes: null,
-  });
-  const downloadAbortRef = useRef<AbortController | null>(null);
   const seekNonceRef = useRef(0);
-
-  // Current plan's hash, compared against manifest.preview.planHash to know
-  // if the cached preview MP4 is stale.
-  const currentPlanHash = useMemo(() => (plan ? hashPlan(plan) : null), [plan]);
-  const cachedPreview = editor?.manifest.preview ?? null;
-  const isPreviewStale = !!(
-    cachedPreview && currentPlanHash && cachedPreview.planHash !== currentPlanHash
-  );
-  const previewMp4Url = useMemo(() => {
-    if (!sessionId || !cachedPreview) return null;
-    return `/api/media/${sessionId}/output/${cachedPreview.filename}`;
-  }, [sessionId, cachedPreview]);
-  const isRendering = renderJobId !== null;
+  // Timeline interaction state
+  const [selectedSegId, setSelectedSegId] = useState<string | null>(null);
+  const [pxPerSec, setPxPerSec] = useState(36);
+  const [planPast, setPlanPast] = useState<EditPlan[]>([]);
+  const [planFuture, setPlanFuture] = useState<EditPlan[]>([]);
+  const currentMsRef = useRef(0);
+  useEffect(() => { currentMsRef.current = currentMs; }, [currentMs]);
 
   // If a session already has a saved edit plan on disk, jump straight into edit mode.
   useEffect(() => {
@@ -252,10 +231,77 @@ export default function StudioPage() {
     };
   }, [sessionId]);
 
-  const onPlanChange = (next: EditPlan) => {
-    setPlan(next);
-    savePlanDebounced(next);
-  };
+  // Refs mirror the latest plan/history so the edit handlers can read current
+  // values and call all setters FLATLY (never setState inside another setState
+  // updater — that triggers "update while rendering" warnings).
+  const planRef = useRef<EditPlan | null>(null);
+  const pastRef = useRef<EditPlan[]>([]);
+  const futureRef = useRef<EditPlan[]>([]);
+  useEffect(() => { planRef.current = plan; }, [plan]);
+  useEffect(() => { pastRef.current = planPast; }, [planPast]);
+  useEffect(() => { futureRef.current = planFuture; }, [planFuture]);
+
+  // History-tracked plan commit (one entry per edit gesture).
+  const commitPlan = useCallback(
+    (next: EditPlan) => {
+      const cur = planRef.current;
+      setPlanPast(cur ? [...pastRef.current.slice(-49), cur] : pastRef.current);
+      setPlanFuture([]);
+      setPlan(next);
+      savePlanDebounced(next);
+    },
+    [savePlanDebounced],
+  );
+
+  const undo = useCallback(() => {
+    const past = pastRef.current;
+    if (!past.length) return;
+    const prev = past[past.length - 1];
+    const cur = planRef.current;
+    if (cur) setPlanFuture([cur, ...futureRef.current]);
+    setPlan(prev);
+    setPlanPast(past.slice(0, -1));
+    savePlanDebounced(prev);
+  }, [savePlanDebounced]);
+
+  const redo = useCallback(() => {
+    const future = futureRef.current;
+    if (!future.length) return;
+    const nxt = future[0];
+    const cur = planRef.current;
+    if (cur) setPlanPast([...pastRef.current, cur]);
+    setPlan(nxt);
+    setPlanFuture(future.slice(1));
+    savePlanDebounced(nxt);
+  }, [savePlanDebounced]);
+
+  const onPlanChange = commitPlan;
+
+  // Timeline edit ops — all read planRef and commit flatly.
+  const doSplit = useCallback(() => {
+    const cur = planRef.current;
+    if (!cur) return;
+    const next = applySplit(cur, currentMsRef.current);
+    if (next === cur) return;
+    commitPlan(next);
+  }, [commitPlan]);
+
+  const doDeleteSelected = useCallback(() => {
+    const cur = planRef.current;
+    if (!cur || !selectedSegId) return;
+    commitPlan(applyDelete(cur, selectedSegId));
+    setSelectedSegId(null);
+  }, [selectedSegId, commitPlan]);
+
+  const doAddClip = useCallback(
+    (clipId: string, ms: number) => {
+      const cur = planRef.current;
+      const clip = manifest?.clips.find((c) => c.id === clipId);
+      if (!cur || !clip) return;
+      commitPlan(addFromLibrary(cur, clip, ms));
+    },
+    [manifest, commitPlan],
+  );
 
   const saveSubtitlesDebounced = useMemo(() => {
     let t: ReturnType<typeof setTimeout> | null = null;
@@ -300,212 +346,109 @@ export default function StudioPage() {
     [saveSubtitlesDebounced],
   );
 
-  const onSeek = (ms: number) => {
+  const onSeek = useCallback((ms: number) => {
     seekNonceRef.current += 1;
     setSeekReq({ ms, nonce: seekNonceRef.current });
-  };
+  }, []);
 
-  // Fire /api/render and let the SSE subscriber below pick up progress +
-  // completion. Reuses the same jobStore + /api/job/[id] mechanism as the
-  // main pipeline — no new infra needed client-side.
-  const onRequestRerender = useCallback(async () => {
-    if (!sessionId || renderJobId) return;
-    try {
-      const res = await fetch("/api/render", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId }),
-      });
-      if (!res.ok) {
-        const j = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(j.error || "Could not start re-render");
-      }
-      const j = (await res.json()) as { jobId: string };
-      setRenderJobId(j.jobId);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Re-render failed to start");
-    }
-  }, [sessionId, renderJobId]);
-
-  // Subscribe to the render job's SSE stream — refresh editor bundle on
-  // completion so manifest.preview points at the freshly rendered MP4 and
-  // the Preview reloads it.
+  // Editor keyboard shortcuts (Premiere-style). Ignored while typing.
   useEffect(() => {
-    if (!renderJobId || !sessionId) return;
-    const es = new EventSource(`/api/job/${renderJobId}`, { withCredentials: false });
-    es.onmessage = async (ev) => {
-      try {
-        const data = JSON.parse(ev.data) as JobState | { error: string };
-        if ("error" in data) {
-          toast.error(data.error);
-          es.close();
-          setRenderJobId(null);
-          return;
-        }
-        if (data.status === "complete") {
-          es.close();
-          const res = await fetch(`/api/editor?sessionId=${sessionId}`);
-          if (res.ok) {
-            const j = (await res.json()) as EditorData;
-            setEditor(j);
-          }
-          setRenderJobId(null);
-          toast.success("Preview rendered");
-        } else if (data.status === "failed" || data.status === "stopped") {
-          es.close();
-          setRenderJobId(null);
-          toast.error(data.error ?? "Re-render failed");
-        }
-      } catch {
-        /* ignore */
-      }
-    };
-    es.onerror = () => {
-      es.close();
-      setRenderJobId(null);
-    };
-    return () => es.close();
-  }, [renderJobId, sessionId]);
-
-  // Streamed bundle download with real-percentage progress + error
-  // handling. Replaces the old `fetch → .blob() → click anchor` path,
-  // which had no progress reporting and silently swallowed mid-stream
-  // failures. Reads the response body chunk-by-chunk so the modal can
-  // show bytes received in real time; surfaces non-2xx / network /
-  // stream-interrupt errors with specific messages.
-  const downloadBundleStreamed = useCallback(async () => {
-    if (!sessionId) return;
-    // Cancel any in-flight download before starting a new one.
-    downloadAbortRef.current?.abort();
-    const ctrl = new AbortController();
-    downloadAbortRef.current = ctrl;
-
-    setDownloadState({ stage: "preparing", receivedBytes: 0, totalBytes: null });
-    try {
-      const res = await fetch("/api/export/bundle", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId }),
-        signal: ctrl.signal,
-      });
-      if (!res.ok) {
-        const j = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(j.error ?? `Server responded ${res.status}`);
-      }
-      if (!res.body) throw new Error("Response had no body");
-      const total = Number(res.headers.get("content-length") ?? 0) || null;
-      const reader = res.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let received = 0;
-      setDownloadState({ stage: "downloading", receivedBytes: 0, totalBytes: total });
-      // Streaming read loop — push the modal an update on each chunk.
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-        setDownloadState({ stage: "downloading", receivedBytes: received, totalBytes: total });
-      }
-      // If server advertised a total but we got fewer bytes, the stream
-      // was truncated server-side (archiver error mid-pack). Surface it
-      // explicitly instead of saving a broken ZIP.
-      if (total && received < total) {
-        throw new Error(
-          `Download truncated — got ${received.toLocaleString()} of ${total.toLocaleString()} bytes. Server likely errored mid-archive. Try again.`,
-        );
-      }
-      setDownloadState({ stage: "saving", receivedBytes: received, totalBytes: total });
-      const blob = new Blob(chunks as BlobPart[], { type: "application/zip" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `producer-${sessionId.slice(0, 6)}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      setDownloadState({ stage: "done", receivedBytes: received, totalBytes: total });
-      toast.success("Downloaded project bundle");
-    } catch (err) {
-      if (ctrl.signal.aborted) {
-        // User cancelled — reset to idle silently, no modal stays open.
-        setDownloadState({ stage: "idle", receivedBytes: 0, totalBytes: null });
+    if (mode !== "edit") return;
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
         return;
       }
-      const msg = err instanceof Error ? err.message : "Download failed";
-      setDownloadState((s) => ({
-        ...s,
-        stage: "error",
-        errorMessage: msg,
-      }));
-    } finally {
-      if (downloadAbortRef.current === ctrl) downloadAbortRef.current = null;
-    }
-  }, [sessionId]);
+      if (meta && (e.key === "y" || e.key === "Y")) { e.preventDefault(); redo(); return; }
+      if (e.key === "s" || e.key === "S") { e.preventDefault(); doSplit(); return; }
+      if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); doDeleteSelected(); return; }
+      if (e.key === "ArrowLeft") { e.preventDefault(); onSeek(Math.max(0, currentMsRef.current - (e.shiftKey ? 1000 : 100))); return; }
+      if (e.key === "ArrowRight") { e.preventDefault(); onSeek(currentMsRef.current + (e.shiftKey ? 1000 : 100)); return; }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mode, undo, redo, doSplit, doDeleteSelected, onSeek]);
 
-  const cancelDownload = useCallback(() => {
-    downloadAbortRef.current?.abort();
-    setDownloadState({ stage: "idle", receivedBytes: 0, totalBytes: null });
-  }, []);
-
-  const closeDownloadModal = useCallback(() => {
-    setDownloadState({ stage: "idle", receivedBytes: 0, totalBytes: null });
-  }, []);
-
-  // Rough size estimate shown in the confirm dialog. Sums uploaded clip
-  // bytes + voiceover bytes. Excludes the rendered preview (we don't
-  // know its size from the manifest; it's small relative to source clips).
-  const bundleSizeEstimateBytes = useMemo(() => {
-    if (!editor) return 0;
-    const clipsSize = editor.manifest.clips.reduce((s, c) => s + (c.sizeBytes ?? 0), 0);
-    const voSize = editor.manifest.voiceover?.sizeBytes ?? 0;
-    return clipsSize + voSize;
-  }, [editor]);
-
-  const exportFile = async (kind: ExportKind, opts?: { subtitles?: boolean }) => {
-    if (!sessionId) return;
-    setExporting(kind);
-    try {
-      const res = await fetch(`/api/export/${kind}`, {
+  // Render-on-demand MP4 download for one mode. Returns true on success.
+  const fetchMp4 = useCallback(
+    async (mode: "clean" | "burned" | "greenscreen", suffix: string) => {
+      if (!sessionId) return false;
+      const res = await fetch("/api/export/mp4", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, subtitles: opts?.subtitles }),
+        body: JSON.stringify({ sessionId, mode }),
       });
       if (!res.ok) {
-        // The MP4 cache-passthrough returns 409 when the cached render is
-        // stale. Surface that as a clear prompt to re-render rather than a
-        // generic export-failed toast.
-        if (res.status === 409 && kind === "mp4") {
-          const j = (await res.json().catch(() => ({}))) as { error?: string; stale?: boolean };
-          toast.error(j.error ?? "Preview is stale — click Re-render in the editor first.");
-          return;
-        }
         const j = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(j.error || "Export failed. Try again.");
       }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url; // REQUIRED — without it the click is a no-op (nothing downloads).
-      const subSuffix = kind === "mp4" && opts?.subtitles ? "-subtitled" : "";
-      a.download = `producer-${sessionId.slice(0, 6)}${subSuffix}.${kind === "bundle" ? "zip" : kind}`;
+      a.href = url; // REQUIRED — without it the click is a silent no-op.
+      a.download = `producer-${sessionId.slice(0, 6)}${suffix}.mp4`;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      // Defer revoke so the browser has the URL when it starts the download
-      // (revoking synchronously can cancel it for larger blobs in some browsers).
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      const message =
-        kind === "mp4"
-          ? "Downloaded MP4"
-          : "Downloaded project bundle — unzip and open the .xml in Premiere / Resolve / FCP";
-      toast.success(message);
+      setTimeout(() => URL.revokeObjectURL(url), 15_000);
+      return true;
+    },
+    [sessionId],
+  );
+
+  // Download options: clean reel · burned-in captions · clean + a separate
+  // green-screen subtitle file (two downloads fired together; no zip).
+  const downloadMp4 = useCallback(
+    async (choice: "clean" | "burned" | "clean+greenscreen") => {
+      if (!sessionId) return;
+      setExporting("mp4");
+      try {
+        if (choice === "clean") {
+          await fetchMp4("clean", "");
+          toast.success("Downloaded MP4");
+        } else if (choice === "burned") {
+          await fetchMp4("burned", "-subtitled");
+          toast.success("Downloaded MP4 (subtitles burned in)");
+        } else {
+          await fetchMp4("clean", "");
+          await fetchMp4("greenscreen", "-subtitles-greenscreen");
+          toast.success("Downloaded MP4 + green-screen subtitles");
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Export failed");
+      } finally {
+        setExporting("none");
+      }
+    },
+    [sessionId, fetchMp4],
+  );
+
+  const generateSubtitles = useCallback(async () => {
+    if (!sessionId) return;
+    setGeneratingSubs(true);
+    try {
+      const res = await fetch("/api/subtitles/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error || "Could not generate subtitles");
+      }
+      const j = (await res.json()) as { subtitles: SubtitleState };
+      setSubtitles(j.subtitles);
+      toast.success("Subtitles generated");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Export failed");
+      toast.error(err instanceof Error ? err.message : "Failed to generate subtitles");
     } finally {
-      setExporting("none");
+      setGeneratingSubs(false);
     }
-  };
+  }, [sessionId]);
 
   const tryAgain = useCallback(async () => {
     if (!activeJob) return;
@@ -534,19 +477,12 @@ export default function StudioPage() {
                   totalUsd={editor.manifest.costs?.totalUsd ?? 0}
                   breakdown={editor.manifest.costs?.breakdown}
                 />
-                <Button
-                  variant="outline"
-                  onClick={() => setBundleConfirmOpen(true)}
-                  disabled={downloadState.stage !== "idle"}
-                  title="Download the XML + all source clips + voiceover as a .zip — Premiere opens it with zero relink"
-                >
-                  {downloadState.stage === "downloading" || downloadState.stage === "preparing" || downloadState.stage === "saving" ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <FileArchive className="size-4" />
-                  )}
-                  Download project (.zip)
-                </Button>
+                {!subtitles && (
+                  <Button variant="outline" onClick={generateSubtitles} disabled={generatingSubs} title="Chunk the voiceover into captions">
+                    {generatingSubs ? <Loader2 className="size-4 animate-spin" /> : <Captions className="size-4" />}
+                    Generate subtitles
+                  </Button>
+                )}
                 <Button onClick={() => setMp4ModalOpen(true)} disabled={exporting !== "none"} size="lg">
                   {exporting === "mp4" ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
                   Download MP4
@@ -584,8 +520,10 @@ export default function StudioPage() {
             <EditView
               editor={editor}
               plan={plan}
+              sessionId={sessionId}
               clipsBySection={clipsBySection}
               clipsMap={clipsMap}
+              onClipsChanged={refresh}
               overridePrompt={overridePrompt}
               setOverridePrompt={setOverridePrompt}
               currentMs={currentMs}
@@ -593,12 +531,20 @@ export default function StudioPage() {
               seekReq={seekReq}
               onSeek={onSeek}
               onPlanChange={onPlanChange}
+              selectedId={selectedSegId}
+              onSelect={setSelectedSegId}
+              pxPerSec={pxPerSec}
+              onZoom={setPxPerSec}
+              onSplit={doSplit}
+              onDeleteSelected={doDeleteSelected}
+              onAddClipAt={doAddClip}
+              onUndo={undo}
+              onRedo={redo}
+              canUndo={planPast.length > 0}
+              canRedo={planFuture.length > 0}
+              voiceoverUrl={editor.manifest.voiceover?.url ?? null}
               onRerun={() => startJob({ overridePrompt })}
               onBackToSetup={() => { setMode("setup"); setEditor(null); setPlan(null); }}
-              previewMp4Url={previewMp4Url}
-              isPreviewStale={isPreviewStale}
-              isRendering={isRendering}
-              onRequestRerender={onRequestRerender}
               subtitleState={subtitles}
               onSubtitleStyleChange={onSubtitleStyleChange}
               onCaptionsChange={onCaptionsChange}
@@ -628,30 +574,15 @@ export default function StudioPage() {
           await resetSession(sessionId);
         }}
       />
-      <BundleConfirm
-        open={bundleConfirmOpen}
-        estimatedBytes={bundleSizeEstimateBytes}
-        onCancel={() => setBundleConfirmOpen(false)}
-        onConfirm={() => {
-          setBundleConfirmOpen(false);
-          void downloadBundleStreamed();
-        }}
-      />
       <Mp4DownloadModal
         open={mp4ModalOpen}
         busy={exporting === "mp4"}
         hasSubtitles={!!(subtitles?.captions?.length && subtitles.style.enabled)}
         onCancel={() => setMp4ModalOpen(false)}
-        onPick={(withSubs) => {
+        onPick={(choice) => {
           setMp4ModalOpen(false);
-          void exportFile("mp4", { subtitles: withSubs });
+          void downloadMp4(choice);
         }}
-      />
-      <DownloadProgress
-        state={downloadState}
-        onCancel={cancelDownload}
-        onRetry={() => void downloadBundleStreamed()}
-        onClose={closeDownloadModal}
       />
       <RouterMirror router={router} mode={mode} />
     </div>
@@ -801,8 +732,10 @@ function SetupView({
 interface EditViewProps {
   editor: EditorData;
   plan: EditPlan;
+  sessionId: string | null;
   clipsBySection: Record<SectionId, SourceClip[]>;
   clipsMap: Record<string, SourceClip>;
+  onClipsChanged: () => void;
   overridePrompt: string;
   setOverridePrompt: (v: string) => void;
   currentMs: number;
@@ -810,12 +743,20 @@ interface EditViewProps {
   seekReq: { ms: number; nonce: number } | null;
   onSeek: (ms: number) => void;
   onPlanChange: (p: EditPlan) => void;
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  pxPerSec: number;
+  onZoom: (v: number) => void;
+  onSplit: () => void;
+  onDeleteSelected: () => void;
+  onAddClipAt: (clipId: string, ms: number) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  voiceoverUrl: string | null;
   onRerun: () => void;
   onBackToSetup: () => void;
-  previewMp4Url: string | null;
-  isPreviewStale: boolean;
-  isRendering: boolean;
-  onRequestRerender: () => void;
   subtitleState: SubtitleState | null;
   onSubtitleStyleChange: (s: SubtitleStyle) => void;
   onCaptionsChange: (c: Caption[]) => void;
@@ -824,8 +765,10 @@ interface EditViewProps {
 function EditView({
   editor,
   plan,
+  sessionId,
   clipsBySection,
   clipsMap,
+  onClipsChanged,
   overridePrompt,
   setOverridePrompt,
   currentMs,
@@ -833,21 +776,29 @@ function EditView({
   seekReq,
   onSeek,
   onPlanChange,
+  selectedId,
+  onSelect,
+  pxPerSec,
+  onZoom,
+  onSplit,
+  onDeleteSelected,
+  onAddClipAt,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
+  voiceoverUrl,
   onRerun,
   onBackToSetup,
-  previewMp4Url,
-  isPreviewStale,
-  isRendering,
-  onRequestRerender,
   subtitleState,
   onSubtitleStyleChange,
   onCaptionsChange,
 }: EditViewProps) {
   const totalMs = plan.totalDurationMs || editor.alignment.durationMs;
   return (
-    <div className="flex flex-col gap-3">
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[22rem_1fr_22rem]">
-        <aside className="flex flex-col gap-3">
+    <div className="flex flex-col gap-3 lg:h-[calc(100vh-5.5rem)]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[22rem_1fr_22rem]">
+        <aside className="flex min-h-0 flex-col gap-3 overflow-hidden">
           <Card>
             <CardHeader className="p-4">
               <CardTitle className="text-base">Steering</CardTitle>
@@ -865,28 +816,24 @@ function EditView({
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader className="p-4 pb-2">
-              <CardTitle className="text-base">Reel stats</CardTitle>
-            </CardHeader>
-            <CardContent className="grid grid-cols-3 gap-2 p-4 pt-0 text-center">
-              <Stat label="Segments" value={plan.segments.length.toString()} />
-              <Stat label="Duration" value={formatDuration(totalMs)} />
-              <Stat label="Clips" value={editor.manifest.clips.length.toString()} />
-            </CardContent>
-          </Card>
+          <ClipLibrary
+            sessionId={sessionId}
+            clipsBySection={clipsBySection}
+            currentMs={currentMs}
+            onAddClipAt={onAddClipAt}
+            onClipsChanged={onClipsChanged}
+          />
         </aside>
 
-        <section className="flex flex-col items-center justify-start">
+        <section className="flex min-h-0 flex-col items-center justify-start overflow-y-auto">
           <Card className="w-full">
             <CardContent className="p-3">
               <Preview
-                previewMp4Url={previewMp4Url}
-                isStale={isPreviewStale}
-                isRendering={isRendering}
-                onRequestRerender={onRequestRerender}
+                clips={clipsMap}
                 segments={plan.segments}
-                totalDurationMs={totalMs}
+                totalDurationMs={plan.totalDurationMs}
+                voiceoverUrl={voiceoverUrl}
+                voiceoverDurationMs={editor.alignment.durationMs}
                 seekRequest={seekReq}
                 onTime={onTime}
                 captions={subtitleState?.captions}
@@ -897,9 +844,9 @@ function EditView({
           </Card>
         </section>
 
-        <aside className="flex flex-col gap-3">
-          <Card>
-            <CardContent className="p-4">
+        <aside className="flex min-h-0 flex-col gap-3 overflow-hidden">
+          <Card className="flex min-h-0 flex-1 flex-col">
+            <CardContent className="min-h-0 flex-1 overflow-y-auto p-4">
               {subtitleState ? (
                 <SubtitleScriptBox
                   style={subtitleState.style}
@@ -909,48 +856,183 @@ function EditView({
                 />
               ) : (
                 <p className="py-6 text-center text-xs text-muted-foreground">
-                  Subtitles will appear here once the reel is generated.
+                  Click <span className="font-medium text-foreground">Generate subtitles</span> in the header to add captions.
                 </p>
               )}
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="space-y-1 p-3 text-[11px] text-muted-foreground leading-relaxed">
-              <p>· Click a caption on the video to restyle; drag it up/down to reposition.</p>
-              <p>· Drag clip edges to re-trim; drag the body to reorder within a section.</p>
             </CardContent>
           </Card>
         </aside>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between px-1">
+      <div className="flex shrink-0 flex-col gap-1.5">
+        <div className="flex items-center gap-2 px-1">
           <h2 className="font-display text-base font-semibold tracking-tight">Timeline</h2>
-          <span className="font-mono text-xs tabular-nums text-muted-foreground">
-            {formatDuration(currentMs)} / {formatDuration(totalMs)}
-          </span>
+          <div className="ml-auto flex items-center gap-1">
+            <Button variant="ghost" size="icon" className="size-7 disabled:opacity-40" onClick={onUndo} disabled={!canUndo} title="Undo (⌘Z)">
+              <Undo2 className="size-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" className="size-7 disabled:opacity-40" onClick={onRedo} disabled={!canRedo} title="Redo (⇧⌘Z)">
+              <Redo2 className="size-3.5" />
+            </Button>
+          </div>
         </div>
         <Timeline
           plan={plan}
           clips={clipsMap}
-          clipsBySection={clipsBySection}
-          totalDurationMs={totalMs}
-          voiceoverWords={editor.alignment.words}
+          voiceoverUrl={voiceoverUrl}
           captions={subtitleState?.captions}
           currentTimeMs={currentMs}
+          selectedId={selectedId}
+          pxPerSec={pxPerSec}
+          onZoom={onZoom}
           onSeek={onSeek}
+          onSelect={onSelect}
           onChange={onPlanChange}
+          onSplit={onSplit}
+          onDeleteSelected={onDeleteSelected}
+          onAddClipAt={onAddClipAt}
         />
       </div>
     </div>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+/* ============================== CLIP LIBRARY ============================== */
+
+function ClipLibrary({
+  sessionId,
+  clipsBySection,
+  currentMs,
+  onAddClipAt,
+  onClipsChanged,
+}: {
+  sessionId: string | null;
+  clipsBySection: Record<SectionId, SourceClip[]>;
+  currentMs: number;
+  onAddClipAt: (clipId: string, ms: number) => void;
+  onClipsChanged: () => void;
+}) {
+  const [uploadingTo, setUploadingTo] = useState<SectionId | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const pendingSectionRef = useRef<SectionId | null>(null);
+
+  const anyPending = SECTIONS.some((s) => (clipsBySection[s] ?? []).some((c) => c.proxyReady === false));
+  // Poll the manifest while any proxy is still transcoding.
+  useEffect(() => {
+    if (!anyPending) return;
+    const t = setInterval(() => onClipsChanged(), 2000);
+    return () => clearInterval(t);
+  }, [anyPending, onClipsChanged]);
+
+  const pickFor = (section: SectionId) => {
+    pendingSectionRef.current = section;
+    fileRef.current?.click();
+  };
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const section = pendingSectionRef.current;
+    e.target.value = "";
+    if (!file || !section || !sessionId) return;
+    setUploadingTo(section);
+    try {
+      await uploadClip(sessionId, section, file);
+      onClipsChanged();
+    } catch {
+      toast.error("Upload failed");
+    } finally {
+      setUploadingTo(null);
+    }
+  };
+
   return (
-    <div className="rounded-lg border border-border/60 bg-background/40 px-2 py-3">
-      <div className="font-display text-lg font-semibold tabular-nums">{value}</div>
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+    <Card className="flex min-h-0 flex-1 flex-col">
+      <CardHeader className="p-4 pb-2">
+        <CardTitle className="text-base">Clip library</CardTitle>
+        <CardDescription className="text-xs">Drag a clip onto the timeline, or use + to drop it at the playhead.</CardDescription>
+      </CardHeader>
+      <CardContent className="flex-1 space-y-3 overflow-y-auto p-4 pt-2">
+        <input ref={fileRef} type="file" accept="video/*,image/*" hidden onChange={onFile} />
+        {SECTIONS.map((section) => {
+          const clips = clipsBySection[section] ?? [];
+          return (
+            <div key={section}>
+              <div className="mb-1.5 flex items-center gap-1.5">
+                <span className="size-2 rounded-full" style={{ background: `hsl(var(${SECTION_DOT_VAR[section]}))` }} />
+                <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{SECTION_LABEL[section]}</span>
+                <button
+                  type="button"
+                  onClick={() => pickFor(section)}
+                  disabled={uploadingTo === section}
+                  className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary hover:text-foreground"
+                >
+                  {uploadingTo === section ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />} Add
+                </button>
+              </div>
+              {clips.length === 0 ? (
+                <p className="pb-1 text-[11px] text-muted-foreground/70">No clips.</p>
+              ) : (
+                <div className="grid grid-cols-3 gap-1.5">
+                  {clips.map((c) => (
+                    <LibraryClip key={c.id} clip={c} onAdd={() => onAddClipAt(c.id, currentMs)} />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
+
+function LibraryClip({ clip, onAdd }: { clip: SourceClip; onAdd: () => void }) {
+  const ready = clip.proxyReady !== false;
+  // Never use a video URL as an <img> (broken thumbnail). Posters are jpgs;
+  // images use their own url; videos without a poster yet show a placeholder.
+  const base = clip.url.slice(0, clip.url.length - clip.relPath.length);
+  const posterUrl = clip.posterRelPath ? base + clip.posterRelPath : clip.kind === "image" ? clip.url : null;
+  const [imgFailed, setImgFailed] = useState(false);
+  return (
+    <div
+      draggable={ready}
+      onDragStart={(e) => {
+        e.dataTransfer.setData("text/clip-id", clip.id);
+        e.dataTransfer.effectAllowed = "copy";
+      }}
+      title={clip.filename}
+      className={cn(
+        "group relative aspect-[9/16] overflow-hidden rounded-md border border-border bg-secondary",
+        ready ? "cursor-grab active:cursor-grabbing" : "opacity-60",
+      )}
+    >
+      {posterUrl && !imgFailed ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={posterUrl} alt="" draggable={false} onError={() => setImgFailed(true)} className="pointer-events-none h-full w-full object-cover" />
+      ) : (
+        <div className="grid h-full w-full place-items-center bg-secondary">
+          <FileVideo className="size-4 text-muted-foreground/50" />
+        </div>
+      )}
+      {!ready && (
+        <div className="absolute inset-0 grid place-items-center bg-background/50">
+          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+        </div>
+      )}
+      {ready && (
+        <button
+          type="button"
+          onClick={onAdd}
+          className="absolute right-1 top-1 grid size-5 place-items-center rounded bg-background/85 text-foreground opacity-0 transition-opacity group-hover:opacity-100"
+          title="Add at playhead"
+        >
+          <Plus className="size-3" />
+        </button>
+      )}
+      {clip.durationMs > 0 && (
+        <span className="absolute bottom-0.5 left-0.5 rounded bg-black/70 px-1 font-mono text-[8px] tabular-nums text-white/90">
+          {formatDuration(clip.durationMs)}
+        </span>
+      )}
     </div>
   );
 }
@@ -1104,56 +1186,6 @@ function ResetConfirm({
   );
 }
 
-/* ============================== BUNDLE DOWNLOAD CONFIRM ============================== */
-
-function BundleConfirm({
-  open,
-  estimatedBytes,
-  onCancel,
-  onConfirm,
-}: {
-  open: boolean;
-  estimatedBytes: number;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const sizeStr = (() => {
-    if (estimatedBytes <= 0) return null;
-    if (estimatedBytes < 1024 * 1024) return `${(estimatedBytes / 1024).toFixed(1)} KB`;
-    if (estimatedBytes < 1024 * 1024 * 1024) return `${(estimatedBytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(estimatedBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-  })();
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onCancel(); }}>
-      <DialogContent className="!max-w-md">
-        <DialogTitle className="font-display text-lg font-semibold leading-tight">
-          Download project bundle?
-        </DialogTitle>
-        <DialogDescription className="mt-2 text-sm text-muted-foreground leading-relaxed">
-          You&apos;ll get a single <span className="font-mono">.zip</span> containing the XML
-          project file, all source clips, the voiceover, and the rendered preview MP4. Premiere /
-          Resolve / FCP open it with zero relink.
-          {sizeStr && (
-            <>
-              {" "}
-              <span className="text-foreground">Estimated size: ~{sizeStr}</span> (final ZIP may
-              differ slightly).
-            </>
-          )}
-        </DialogDescription>
-        <div className="mt-5 flex items-center justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-          <Button variant="default" onClick={onConfirm}>
-            <FileArchive className="size-4" />
-            Download
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 /* ============================== MP4 DOWNLOAD MODAL ============================== */
 
 function Mp4DownloadModal({
@@ -1167,7 +1199,7 @@ function Mp4DownloadModal({
   busy: boolean;
   hasSubtitles: boolean;
   onCancel: () => void;
-  onPick: (withSubtitles: boolean) => void;
+  onPick: (choice: "clean" | "burned" | "clean+greenscreen") => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) onCancel(); }}>
@@ -1177,19 +1209,25 @@ function Mp4DownloadModal({
         </DialogTitle>
         <DialogDescription className="mt-2 text-sm text-muted-foreground leading-relaxed">
           {hasSubtitles
-            ? "Burn the captions into the video, or export the clean cut without them. (The .zip export always keeps subtitles as a separate green-screen layer.)"
-            : "No captions are enabled, so the MP4 will export without subtitles."}
+            ? "Choose how to export. The reel renders at full 1080×1920."
+            : "No captions generated yet — the MP4 will export clean. Use “Generate subtitles” first to enable caption options."}
         </DialogDescription>
-        <div className="mt-5 flex items-center justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
-          <Button variant="outline" onClick={() => onPick(false)} disabled={busy}>
+        <div className="mt-5 flex flex-col gap-2">
+          <Button variant="outline" className="justify-start" onClick={() => onPick("clean")} disabled={busy}>
             {busy ? <Loader2 className="size-4 animate-spin" /> : <FileVideo className="size-4" />}
             Without subtitles
           </Button>
-          <Button onClick={() => onPick(true)} disabled={busy || !hasSubtitles}>
+          <Button variant="outline" className="justify-start" onClick={() => onPick("burned")} disabled={busy || !hasSubtitles}>
             {busy ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
-            With subtitles
+            With subtitles (burned in)
           </Button>
+          <Button variant="outline" className="justify-start" onClick={() => onPick("clean+greenscreen")} disabled={busy || !hasSubtitles}>
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
+            Clean MP4 + green-screen subtitles file
+          </Button>
+        </div>
+        <div className="mt-4 flex items-center justify-end">
+          <Button variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
         </div>
       </DialogContent>
     </Dialog>

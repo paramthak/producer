@@ -1,126 +1,92 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
-import path from "node:path";
 import { paths, readJson } from "@/lib/session";
-import { loadManifest } from "@/lib/manifest";
-import { loadOrInitSubtitleState } from "@/lib/subtitlesStore";
-import { renderSubtitledMp4 } from "@/lib/subtitleRender";
-import { hashPlan } from "@/lib/planHash";
+import { renderReelMp4 } from "@/lib/render";
+import { loadSubtitleState } from "@/lib/subtitlesStore";
+import { renderSubtitledMp4, renderGreenScreenSubs } from "@/lib/subtitleRender";
 import { nodeStreamToWebStream } from "@/lib/streamHelpers";
 import type { EditPlan } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 600;
 
+type Mode = "clean" | "burned" | "greenscreen";
+
 /**
- * Cache passthrough.
+ * Render-on-demand MP4 export. One file per request:
+ *   - clean       → the reel MP4 (voiceover only, no captions)
+ *   - burned      → the reel with captions burned in
+ *   - greenscreen → the captions on a chroma-green background (sidecar)
  *
- * The pipeline's render phase (and the /api/render endpoint) writes a
- * preview MP4 named preview-<planHash>.mp4 and stores the metadata on
- * manifest.preview. This route just streams that file — no rendering
- * happens here anymore.
- *
- * If the cached planHash doesn't match the current edit plan's hash, the
- * cached MP4 is stale (user edited the plan since the last render). We
- * return 409 with structured error so the frontend can prompt the user
- * to click "Re-render preview" before downloading.
+ * The "clean + separate green-screen file" download fires TWO requests
+ * (clean, then greenscreen) client-side — no zip. The render is cached by
+ * plan/subtitle hash, so the shared reel render is computed once.
  */
 export async function POST(req: NextRequest) {
-  const body = (await req.json()) as { sessionId: string; subtitles?: boolean };
-  if (!body.sessionId) {
+  const body = (await req.json()) as { sessionId?: string; mode?: Mode; subtitles?: boolean };
+  const sessionId = body.sessionId;
+  // Back-compat: a bare `subtitles:true` maps to burned, else clean.
+  const mode: Mode = body.mode ?? (body.subtitles ? "burned" : "clean");
+  if (!sessionId) {
     return new Response(JSON.stringify({ error: "Missing sessionId" }), { status: 400 });
   }
 
-  const m = await loadManifest(body.sessionId);
-  const p = paths(body.sessionId);
+  const p = paths(sessionId);
   const plan = await readJson<EditPlan>(p.editPlan);
-  if (!m || !plan) {
+  if (!plan) {
     return new Response(JSON.stringify({ error: "Edit plan not ready" }), { status: 400 });
   }
 
-  if (!m.preview) {
-    return new Response(
-      JSON.stringify({
-        error: "Preview not rendered yet. Click Re-render in the editor first.",
-        stale: true,
-        cachedHash: null,
-        currentHash: hashPlan(plan),
-      }),
-      { status: 409, headers: { "content-type": "application/json" } },
-    );
-  }
+  const err = (msg: string, status = 500) =>
+    new Response(JSON.stringify({ error: msg }), { status, headers: { "content-type": "application/json" } });
 
-  const currentHash = hashPlan(plan);
-  if (m.preview.planHash !== currentHash) {
-    return new Response(
-      JSON.stringify({
-        error: "Preview is stale (plan changed since last render). Click Re-render in the editor.",
-        stale: true,
-        cachedHash: m.preview.planHash,
-        currentHash,
-      }),
-      { status: 409, headers: { "content-type": "application/json" } },
-    );
-  }
-
-  const outPath = path.join(p.output, m.preview.filename);
-  let stats;
+  let fileToStream: string;
+  let suffix = "";
   try {
-    stats = await stat(outPath);
-  } catch {
-    return new Response(
-      JSON.stringify({
-        error: "Cached preview file missing. Click Re-render in the editor.",
-        stale: true,
-        cachedHash: m.preview.planHash,
-        currentHash,
-      }),
-      { status: 409, headers: { "content-type": "application/json" } },
-    );
-  }
-
-  // Default: stream the bare preview (subtitles live on a separate layer).
-  let fileToStream = outPath;
-  let fileSize = stats.size;
-
-  // "Download MP4 with subtitles" → burn the captions onto the preview.
-  if (body.subtitles) {
-    const subState = await loadOrInitSubtitleState(body.sessionId);
-    const alignment = await readJson<{ words: unknown[]; durationMs: number }>(p.alignment);
-    if (!subState?.captions?.length) {
-      return new Response(
-        JSON.stringify({ error: "No subtitles to burn in. Generate the reel first." }),
-        { status: 400, headers: { "content-type": "application/json" } },
-      );
-    }
-    try {
-      const burned = await renderSubtitledMp4({
-        previewPath: outPath,
-        planHash: m.preview.planHash,
+    if (mode === "greenscreen") {
+      const subState = await loadSubtitleState(sessionId);
+      const alignment = await readJson<{ durationMs: number }>(p.alignment);
+      if (!subState?.captions?.length) return err("No subtitles to export. Generate subtitles first.", 400);
+      const gs = await renderGreenScreenSubs({
         state: subState,
         totalMs: alignment?.durationMs ?? plan.totalDurationMs,
         outputDir: p.output,
         signal: req.signal,
       });
-      fileToStream = burned.absPath;
-      fileSize = (await stat(burned.absPath)).size;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Subtitle render failed";
-      return new Response(JSON.stringify({ error: `Could not burn subtitles: ${msg}` }), {
-        status: 500,
-        headers: { "content-type": "application/json" },
-      });
+      fileToStream = gs.absPath;
+      suffix = "-subtitles-greenscreen";
+    } else {
+      const reel = await renderReelMp4({ sessionId, plan, signal: req.signal });
+      if (mode === "burned") {
+        const subState = await loadSubtitleState(sessionId);
+        const alignment = await readJson<{ durationMs: number }>(p.alignment);
+        if (!subState?.captions?.length) return err("No subtitles to burn in. Generate subtitles first.", 400);
+        const burned = await renderSubtitledMp4({
+          previewPath: reel.absPath,
+          planHash: reel.planHash,
+          state: subState,
+          totalMs: alignment?.durationMs ?? plan.totalDurationMs,
+          outputDir: p.output,
+          signal: req.signal,
+        });
+        fileToStream = burned.absPath;
+        suffix = "-subtitled";
+      } else {
+        fileToStream = reel.absPath;
+      }
     }
+  } catch (e) {
+    return err(`Render failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  const suffix = body.subtitles ? "-subtitled" : "";
+  const fileSize = (await stat(fileToStream)).size;
   const stream = createReadStream(fileToStream);
   return new Response(nodeStreamToWebStream(stream, req.signal), {
     headers: {
       "content-type": "video/mp4",
       "content-length": String(fileSize),
-      "content-disposition": `attachment; filename="producer-${body.sessionId.slice(0, 6)}${suffix}.mp4"`,
+      "content-disposition": `attachment; filename="producer-${sessionId.slice(0, 6)}${suffix}.mp4"`,
       "cache-control": "no-store",
     },
   });

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { paths, readJson } from "@/lib/session";
 import { loadManifest } from "@/lib/manifest";
-import { loadOrInitSubtitleState } from "@/lib/subtitlesStore";
+import { loadSubtitleState } from "@/lib/subtitlesStore";
 import type { EditPlan, SectionWindow, WordTimestamp } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -17,9 +17,10 @@ export async function GET(req: NextRequest) {
   if (!manifest || !plan || !sections || !alignment) {
     return NextResponse.json({ error: "Editor data not ready" }, { status: 404 });
   }
-  // Subtitles derive from alignment, so they're always available here (lazily
-  // initialized for sessions made before the feature existed).
-  const subtitles = await loadOrInitSubtitleState(sessionId);
+  // Subtitles are ON-DEMAND: only returned if already generated (the user
+  // clicked "Generate subtitles"). Null otherwise so the editor stays
+  // caption-free while they play with the timeline.
+  const subtitles = await loadSubtitleState(sessionId);
   return NextResponse.json({ manifest, plan, sections, alignment, subtitles });
 }
 

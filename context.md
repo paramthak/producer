@@ -6,6 +6,34 @@ Last refreshed: 2026-06-23. The repo has drifted significantly from the original
 
 ---
 
+## 0. ⚠️ LIVE-EDITOR REVAMP (2026-06-30) — read this first
+
+A large change set turned Producer into a live, Premiere-grade editor. The PRD is in repo `PRD.md`. Where this section conflicts with anything below, **this section wins**; several older sections (esp. §17 ZIP/XMEML and parts of §6/§12/§22) are now retired.
+
+**What changed:**
+
+1. **All NLE/export plumbing deleted.** Gone: `lib/xmeml.ts`, `lib/zipBundle.ts`, `app/api/export/bundle`, `app/api/export/xml` (never existed), `app/api/render`, `components/editor/DownloadProgress.tsx`, plus `SourceClip.safeName`, `manifest.preview`, the filename-sanitizer, and the ZIP/Content-Length/Premiere-relink machinery. **§17 and invariants §18.8/§18.9/§18.12 are VOID.**
+
+2. **Proxies (new, `lib/proxy.ts` + `ffmpeg.buildProxy`).** On upload, each video transcodes async to a ~480p dense-keyframe no-audio proxy + poster under `proxies/<clipId>.{mp4,jpg}`. `SourceClip` gained `proxyRelPath`/`posterRelPath`/`proxyReady`. The editor plays proxies (not GB-scale source) so editing is instant over the network.
+
+3. **Free single-track timeline (`lib/planEdit.ts` + rewritten `components/editor/Timeline.tsx`).** Sections are now color tags only. Pure ops: `normalizePlan` (gapless, blanks-filled, true-overwrite resolution — the SHARED source of truth for preview + render), `applyMove`/`applyTrim`/`applySplit`/`applyDelete`/`addFromLibrary`. Drag-to-move (overwrite), edge-trim, split-at-playhead (`S`), delete→black, clip-library drag/`+`, zoom, undo/redo (history in `app/page.tsx`), keyboard (Space/S/Del/arrows/⌘Z). Real waveform sampled client-side via Web Audio. **`applyHoldFills` is removed** — gaps render black, not frozen frames.
+
+4. **Live preview compositor (rewritten `components/editor/Preview.tsx`).** A `setInterval` master clock (NOT rAF — rAF pauses when the tab is hidden) drives a double-buffered proxy `<video>` pool synced to the voiceover `<audio>`. `object-fit: contain` on black = the renderer's letterbox pad → **preview == download** (parity). No end-of-pipeline render; the editor opens straight in.
+
+5. **Render-on-demand (`lib/render.ts`).** `renderReelMp4` consumes `normalizePlan`, encodes each segment (incl. black fillers) to a uniform 1080×1920 intermediate in parallel (`pLimit(4)`), concat-demuxes, and muxes the voiceover with **no `-shortest`** (video past the voiceover keeps a silent tail). Cached by `hashPlan`. Full-res SOURCE clips (not proxies) are used here.
+
+6. **Download MP4 = 3 modes** (`app/api/export/mp4` `{mode:"clean"|"burned"|"greenscreen"}`): clean reel · captions burned in · clean + a separate green-screen subtitle file (two downloads fired together, no zip).
+
+7. **Subtitles are ON-DEMAND.** The pipeline no longer builds captions (the `caption` phase is removed; `PHASES` ends at `assemble`). `/api/editor` returns subtitles only if already generated. A "Generate subtitles" header button calls `POST /api/subtitles/generate` (chunk + Gemini highlight from cached alignment). Palette expanded to ~26 swatches in `SubtitleLayer.tsx`.
+
+8. **Theme = indiamade editorial light** (`app/globals.css`, `tailwind.config.ts`, `app/layout.tsx`): warm cream, saffron primary, peacock secondary/focus, Spectral/Inter/IBM Plex Mono. The video preview frame stays dark.
+
+**Pipeline now:** upload → frames → analyse → trim → align → map → match → **assemble** (sorts segments; writes `edit-plan.json`; no render). Render + captions happen on demand in the editor.
+
+**Anti-pattern fixed:** never call a parent `setState` inside another `setState` updater (caused "update while rendering"); edit-op handlers read latest values via refs and call setters flatly.
+
+---
+
 ## 1. What this product is
 
 **Producer is an AI Reel assembler.** A single user feeds in:

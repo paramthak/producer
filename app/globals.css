@@ -53,90 +53,90 @@
 
 @layer base {
   :root {
-    /* Cosmic Studio — vivid, alive, energetic dark */
-    --background: 240 30% 4%;            /* #07080F */
-    --foreground: 220 40% 97%;
-    --card: 240 28% 8%;                  /* #10101D lifted surface */
-    --card-foreground: 220 40% 97%;
-    --popover: 240 30% 10%;
-    --popover-foreground: 220 40% 97%;
+    /* Producer — warm editorial light (saffron + peacock on cream) */
+    --background: 40 50% 96%;            /* #FAF6EE warm cream / newsprint */
+    --foreground: 30 18% 9%;             /* #1A1612 espresso */
+    --card: 0 0% 100%;                   /* #FFFFFF surface */
+    --card-foreground: 30 18% 9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 30 18% 9%;
 
-    --primary: 250 92% 66%;              /* #6366F1 electric indigo */
+    --primary: 32 92% 44%;               /* #D97706 saffron / marigold */
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 280 50% 18%;            /* deep purple */
-    --secondary-foreground: 220 40% 97%;
+    --secondary: 40 44% 91%;             /* #F4ECDB warm card */
+    --secondary-foreground: 28 21% 24%;  /* #4A3C30 */
 
-    --muted: 240 22% 14%;
-    --muted-foreground: 220 15% 68%;
+    --muted: 40 44% 93%;
+    --muted-foreground: 27 16% 36%;      /* #6B5B4E warm slate */
 
-    --accent: 22 95% 58%;                /* #F97316 electric orange */
+    --accent: 175 77% 26%;               /* #0F766E peacock teal */
     --accent-foreground: 0 0% 100%;
 
-    --destructive: 350 92% 60%;          /* hot pink-red */
+    --destructive: 0 74% 42%;            /* #B91C1C */
     --destructive-foreground: 0 0% 100%;
 
-    --border: 240 25% 18%;
-    --input: 240 28% 11%;
-    --ring: 250 92% 66%;
-    --radius: 0.875rem;
+    --border: 37 38% 85%;                /* #E8DDCB soft beige rule */
+    --input: 38 38% 88%;
+    --ring: 175 77% 26%;                 /* peacock focus */
+    --radius: 0.375rem;                  /* 6px */
 
-    /* Section accents — five distinct energetic hues */
-    --section-hook: 22 95% 62%;          /* orange */
-    --section-bridge: 188 92% 58%;       /* cyan */
-    --section-body: 322 90% 66%;         /* magenta */
-    --section-outro: 268 85% 72%;        /* violet */
-    --section-cta: 152 75% 55%;          /* emerald */
+    /* Section tags — calm, desaturated, distinct against cream */
+    --section-hook: 16 50% 52%;          /* clay / terracotta */
+    --section-bridge: 38 55% 48%;        /* ochre / gold */
+    --section-body: 175 45% 34%;         /* deep peacock */
+    --section-outro: 210 33% 50%;        /* dusty blue */
+    --section-cta: 130 26% 42%;          /* sage green */
 
-    /* Gradients */
-    --grad-aurora: linear-gradient(135deg, hsl(250 92% 66%) 0%, hsl(322 90% 60%) 50%, hsl(22 95% 60%) 100%);
-    --grad-aurora-soft: linear-gradient(135deg, hsl(250 92% 66% / 0.15) 0%, hsl(322 90% 60% / 0.12) 50%, hsl(22 95% 60% / 0.15) 100%);
-    --grad-cool: linear-gradient(135deg, hsl(250 92% 66%) 0%, hsl(188 92% 58%) 100%);
-    --grad-hot: linear-gradient(135deg, hsl(322 90% 66%) 0%, hsl(22 95% 60%) 100%);
+    /* Gradients — quiet, warm; used sparingly for accents */
+    --grad-aurora: linear-gradient(135deg, hsl(32 92% 50%) 0%, hsl(26 90% 42%) 100%);
+    --grad-aurora-soft: linear-gradient(135deg, hsl(32 92% 50% / 0.14) 0%, hsl(26 90% 42% / 0.10) 100%);
+    --grad-cool: linear-gradient(135deg, hsl(175 77% 30%) 0%, hsl(175 55% 42%) 100%);
+    --grad-hot: linear-gradient(135deg, hsl(0 74% 50%) 0%, hsl(26 90% 45%) 100%);
   }
 }
 
 @layer base {
   * { @apply border-border; }
-  html, body { @apply bg-background text-foreground antialiased; font-feature-settings: "rlig" 1, "calt" 1, "ss01" 1; }
+  html, body { @apply bg-background text-foreground antialiased; font-feature-settings: "rlig" 1, "calt" 1; }
 
   body {
     background:
-      radial-gradient(60rem 50rem at 12% -10%, hsl(250 92% 30% / 0.45), transparent 55%),
-      radial-gradient(50rem 40rem at 95% -20%, hsl(322 90% 35% / 0.40), transparent 55%),
-      radial-gradient(70rem 60rem at 60% 120%, hsl(22 95% 35% / 0.30), transparent 60%),
+      radial-gradient(60rem 40rem at 50% -12%, hsl(38 55% 88% / 0.55), transparent 60%),
       hsl(var(--background));
     min-height: 100vh;
   }
 
   h1, h2, h3, h4 { @apply font-display tracking-tight; }
 
-  ::selection { background: hsl(var(--primary) / 0.4); color: white; }
+  ::selection { background: hsl(var(--primary) / 0.22); color: hsl(var(--foreground)); }
+
+  /* Warm editorial scrollbars */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: hsl(var(--rule-strong, 36 30% 70%)); border-radius: 6px; border: 2px solid hsl(var(--background)); }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(28 14% 55%); }
 }
 
 @layer components {
   .surface {
-    @apply rounded-2xl border border-border bg-card/70 backdrop-blur-md;
+    @apply rounded-lg border border-border bg-card;
     box-shadow:
-      0 1px 0 hsl(0 0% 100% / 0.04) inset,
-      0 1px 2px hsl(0 0% 0% / 0.4),
-      0 12px 40px -8px hsl(240 50% 0% / 0.5);
+      0 1px 2px hsl(28 30% 18% / 0.05),
+      0 10px 28px -18px hsl(28 30% 18% / 0.16);
   }
 
   .surface-glow {
-    @apply rounded-2xl border bg-card/60 backdrop-blur-md;
-    border-color: hsl(var(--primary) / 0.35);
+    @apply rounded-lg border bg-card;
+    border-color: hsl(var(--accent) / 0.40);
     box-shadow:
-      0 0 0 1px hsl(var(--primary) / 0.15) inset,
-      0 0 60px -10px hsl(var(--primary) / 0.45),
-      0 12px 40px -8px hsl(240 50% 0% / 0.5);
+      0 0 0 1px hsl(var(--accent) / 0.10) inset,
+      0 12px 32px -18px hsl(var(--accent) / 0.35);
   }
 
+  /* Editorial accent text — solid saffron (no loud gradient). */
   .grad-text {
-    background: var(--grad-aurora);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    color: hsl(var(--primary));
   }
 
   .grad-border {
@@ -154,25 +154,24 @@
     -webkit-mask-composite: xor;
     mask-composite: exclude;
     pointer-events: none;
-    opacity: 0.6;
+    opacity: 0.5;
   }
 
   .btn-glow {
     box-shadow:
-      0 0 0 1px hsl(var(--primary) / 0.35) inset,
-      0 6px 24px -6px hsl(var(--primary) / 0.6),
-      0 2px 6px hsl(0 0% 0% / 0.4);
+      0 1px 2px hsl(28 30% 18% / 0.10),
+      0 8px 20px -10px hsl(var(--primary) / 0.45);
   }
 
+  /* Default button — solid saffron with a soft warm shadow. */
   .btn-aurora {
-    background: var(--grad-aurora);
-    color: white;
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
     box-shadow:
-      0 8px 28px -8px hsl(322 90% 50% / 0.55),
-      0 4px 12px -4px hsl(250 92% 60% / 0.55),
-      0 1px 0 hsl(0 0% 100% / 0.15) inset;
+      0 1px 2px hsl(28 30% 18% / 0.12),
+      0 8px 20px -10px hsl(var(--primary) / 0.5);
   }
-  .btn-aurora:hover { filter: brightness(1.08) saturate(1.05); }
+  .btn-aurora:hover { background: hsl(26 90% 37%); }
 
   .focus-ring {
     @apply outline-none ring-offset-2 ring-offset-background focus-visible:ring-2 focus-visible:ring-ring;
@@ -182,12 +181,8 @@
 @keyframes spinSlow { to { transform: rotate(360deg); } }
 @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
 @keyframes pulseGlow {
-  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--primary) / 0.6), 0 0 40px -8px hsl(var(--primary) / 0.5); }
-  50%      { box-shadow: 0 0 0 8px hsl(var(--primary) / 0.0), 0 0 60px -8px hsl(var(--primary) / 0.7); }
-}
-@keyframes auroraSpin {
-  0%   { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--accent) / 0.5), 0 0 24px -8px hsl(var(--accent) / 0.4); }
+  50%      { box-shadow: 0 0 0 6px hsl(var(--accent) / 0.0), 0 0 32px -8px hsl(var(--accent) / 0.6); }
 }
 
 .animate-spin-slow { animation: spinSlow 4s linear infinite; }

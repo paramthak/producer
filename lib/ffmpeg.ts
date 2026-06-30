@@ -128,6 +128,47 @@ export async function extractFrames(
     .map((e) => path.join(outDir, e));
 }
 
+/**
+ * Build a low-res editing proxy + poster thumbnail for a source video.
+ *
+ *  - Proxy: ~480px tall, H.264 veryfast CRF 28, NO audio, with a DENSE
+ *    keyframe interval (GOP 15 ≈ every 0.5s at 30fps, sc_threshold off) so
+ *    the in-browser player can seek to any source millisecond without a long
+ *    decode stall. This is what makes the live timeline feel instant over a
+ *    public network — the GB-scale source never reaches the browser.
+ *  - Poster: a single ~480px frame as JPEG for the clip library / timeline.
+ */
+export async function buildProxy(
+  srcPath: string,
+  outProxyPath: string,
+  outPosterPath: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await runVoid(
+    FFMPEG,
+    [
+      "-y",
+      "-i", srcPath,
+      "-vf", "scale=-2:480",
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "28",
+      "-g", "15",
+      "-keyint_min", "15",
+      "-sc_threshold", "0",
+      "-an",
+      "-movflags", "+faststart",
+      outProxyPath,
+    ],
+    signal,
+  );
+  await runVoid(
+    FFMPEG,
+    ["-y", "-i", srcPath, "-frames:v", "1", "-vf", "scale=-2:480", "-q:v", "4", outPosterPath],
+    signal,
+  );
+}
+
 export interface RenderSegment {
   inputPath: string;
   isImage: boolean;

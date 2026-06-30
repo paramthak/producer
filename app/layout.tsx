@@ -1,13 +1,14 @@
 import type { Metadata } from "next";
-import { Bricolage_Grotesque, Inter, JetBrains_Mono } from "next/font/google";
+import { Spectral, Inter, IBM_Plex_Mono } from "next/font/google";
 import { Toaster } from "sonner";
 import "./globals.css";
 
-const bricolage = Bricolage_Grotesque({
+const spectral = Spectral({
   subsets: ["latin"],
-  variable: "--font-bricolage",
+  variable: "--font-spectral",
   display: "swap",
-  weight: ["300", "400", "500", "600", "700", "800"],
+  weight: ["300", "400", "500", "600", "700"],
+  style: ["normal", "italic"],
 });
 
 const inter = Inter({
@@ -16,10 +17,11 @@ const inter = Inter({
   display: "swap",
 });
 
-const jetbrains = JetBrains_Mono({
+const plexMono = IBM_Plex_Mono({
   subsets: ["latin"],
-  variable: "--font-jetbrains",
+  variable: "--font-plex-mono",
   display: "swap",
+  weight: ["400", "500", "600"],
 });
 
 export const metadata: Metadata = {
@@ -32,12 +34,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html
       lang="en"
-      className={`${bricolage.variable} ${inter.variable} ${jetbrains.variable} dark`}
+      className={`${spectral.variable} ${inter.variable} ${plexMono.variable}`}
       suppressHydrationWarning
     >
       <body className="font-sans">
         {children}
-        <Toaster theme="dark" position="top-right" richColors closeButton />
+        <Toaster theme="light" position="top-right" richColors closeButton />
       </body>
     </html>
   );

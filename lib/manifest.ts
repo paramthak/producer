@@ -11,12 +11,6 @@ export interface SessionManifest {
   voiceover: {
     /** Original filename as uploaded — kept verbatim for UI display. */
     filename: string;
-    /**
-     * Sanitized filename used by exports (XMEML <name>, ZIP entry).
-     * Optional for back-compat; export helpers fall back to sanitizing
-     * `filename` on the fly when missing. See SourceClip.safeName.
-     */
-    safeName?: string;
     relPath: string;
     url: string;
     sizeBytes: number;
@@ -25,17 +19,6 @@ export interface SessionManifest {
   } | null;
   script: ScriptLine[];
   overridePrompt: string;
-  /**
-   * The most recently rendered preview MP4 for this session, if any.
-   * `planHash` is computed by hashPlan() at render time; the frontend
-   * compares it to the current EditPlan's hash to know whether the
-   * render is stale (user edited the plan since render).
-   */
-  preview?: {
-    filename: string;
-    planHash: string;
-    renderedAt: number;
-  };
   /**
    * Cumulative API spend this session (Gemini + ElevenLabs). Updated as
    * each phase completes. Reset on new-session creation. Undefined for
@@ -57,11 +40,18 @@ export async function removeSource(sessionId: string, clipId: string): Promise<v
   if (!m) return;
   const target = m.clips.find((c) => c.id === clipId);
   if (!target) return;
-  const abs = path.join(paths(sessionId).base, target.relPath);
-  try {
-    await fs.unlink(abs);
-  } catch {
-    /* ignore */
+  const base = paths(sessionId).base;
+  // Source + any generated proxy/poster. (For images posterRelPath === relPath,
+  // so dedupe to avoid a redundant unlink.)
+  const rels = new Set<string>([target.relPath]);
+  if (target.proxyRelPath) rels.add(target.proxyRelPath);
+  if (target.posterRelPath) rels.add(target.posterRelPath);
+  for (const rel of rels) {
+    try {
+      await fs.unlink(path.join(base, rel));
+    } catch {
+      /* ignore */
+    }
   }
   m.clips = m.clips.filter((c) => c.id !== clipId);
   await saveManifest(m);

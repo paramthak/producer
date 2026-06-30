@@ -34,15 +34,6 @@ export interface SourceClip {
    * use `safeName` (or `disambiguateNames(...)` for collision handling).
    */
   filename: string;
-  /**
-   * Filename sanitized at upload time via sanitizeForNleRelink. Stored
-   * here so every export path reads the same canonical value instead of
-   * re-deriving it (which historically caused divergence between routes —
-   * see context.md §17 Trap 4). Optional for back-compat with manifests
-   * written before this field existed; export-time helpers fall back to
-   * sanitizing `filename` on the fly when missing.
-   */
-  safeName?: string;
   /** Path under .producer-data/{session}/sources/, relative to session root. */
   relPath: string;
   /** Public URL the browser can fetch (via /api/media). */
@@ -70,6 +61,25 @@ export interface SourceClip {
    * clip has no audio.
    */
   audioChannels?: number;
+  /**
+   * Relative path to a low-res (~480p, dense-keyframe, no-audio) proxy of
+   * this clip, generated async at upload time. The live editor plays the
+   * proxy (not the GB-scale source) so scrubbing/cuts are instant over the
+   * network. Videos only; undefined for images (small enough to play
+   * directly). Build the URL as /api/media/<sessionId>/<path>.
+   */
+  proxyRelPath?: string;
+  /**
+   * Relative path to a poster thumbnail (~480p JPEG) for the clip library
+   * + timeline cards. For images this points at the original still.
+   */
+  posterRelPath?: string;
+  /**
+   * False until the async proxy/poster transcode finishes. The clip
+   * library disables drag/add-to-timeline until this flips true. Images
+   * are ready immediately (no proxy needed).
+   */
+  proxyReady?: boolean;
 }
 
 export interface ScriptLine {
@@ -142,6 +152,14 @@ export interface PlanSegment {
   coveredWords?: Array<{ text: string; startMs: number; endMs: number }>;
   /** True when this segment is a hold-fill (no clip in section, or section longer than footage). */
   hold?: boolean;
+  /**
+   * Segment kind. "clip" (default/undefined) references a SourceClip via
+   * clipId. "blank" is a synthetic black filler — produced by normalizePlan
+   * for uncovered timeline spans (gaps, deletes, tail past the voiceover).
+   * Blanks are NOT persisted in the stored plan; gaps are implicit and
+   * filled at normalize time so the preview and the render stay identical.
+   */
+  kind?: "clip" | "blank";
 }
 
 export interface EditPlan {
@@ -229,11 +247,9 @@ export const PHASES = [
   "analyse",
   "trim",
   "align",
-  "caption",
   "map",
   "match",
   "assemble",
-  "render",
 ] as const;
 export type PhaseId = (typeof PHASES)[number];
 
@@ -243,11 +259,9 @@ export const PHASE_LABEL: Record<PhaseId, string> = {
   analyse: "Analyse frames",
   trim: "Trim voiceover silences",
   align: "Align voiceover",
-  caption: "Build & highlight captions",
   map: "Map sections to voiceover",
   match: "Match + trim clips",
-  assemble: "Assemble preview",
-  render: "Render preview MP4",
+  assemble: "Assemble cut",
 };
 
 export type PhaseStatus = "pending" | "running" | "complete" | "failed" | "skipped";
