@@ -205,6 +205,81 @@ export function applySplit(plan: EditPlan, atMs: number): EditPlan {
   return { segments, totalDurationMs: plan.totalDurationMs };
 }
 
+/**
+ * Swap two segments by exchanging their exact timeline SLOTS. The dragged
+ * segment takes the target's [start,end] and the target takes the dragged
+ * segment's [start,end]; each clip is resized (its source in/out adjusted) to
+ * fill its new slot — expand to cover a longer slot, trim to fit a shorter
+ * one. Because each lands in a slot that was already occupied, the set of
+ * filled regions is identical to before: NO new gaps, NO overlaps, and the
+ * landing position is exact (independent of where the cursor was). All other
+ * segments stay put.
+ */
+export function applySwap(
+  plan: EditPlan,
+  draggedId: string,
+  targetId: string,
+  clips: Record<string, SourceClip>,
+): EditPlan {
+  if (draggedId === targetId) return plan;
+  const dragged = plan.segments.find((s) => s.id === draggedId);
+  const target = plan.segments.find((s) => s.id === targetId);
+  if (!dragged || !target) return plan;
+  const dSpan = { start: dragged.timelineStartMs, end: dragged.timelineEndMs };
+  const tSpan = { start: target.timelineStartMs, end: target.timelineEndMs };
+  const segments = plan.segments
+    .map((s) => {
+      if (s.id === draggedId) return fitSourceToSpan(s, tSpan.start, tSpan.end, clips);
+      if (s.id === targetId) return fitSourceToSpan(s, dSpan.start, dSpan.end, clips);
+      return s;
+    })
+    .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  return { segments, totalDurationMs: plan.totalDurationMs };
+}
+
+/**
+ * Reposition a segment to [start,end] and adjust its source window to fill
+ * that exact duration. Keeps the in-point (shows the same opening frame) and
+ * extends/trims the out-point; if the source's tail is too short it shifts the
+ * window back so the slot still fills. Images fill any duration (looped/held).
+ */
+function fitSourceToSpan(seg: PlanSegment, start: number, end: number, clips: Record<string, SourceClip>): PlanSegment {
+  const dur = Math.max(MIN_SEG_MS, end - start);
+  const clip = clips[seg.clipId];
+  if (!clip || clip.kind === "image" || !clip.durationMs) {
+    return { ...seg, timelineStartMs: start, timelineEndMs: end, sourceInMs: 0, sourceOutMs: dur };
+  }
+  const srcLen = clip.durationMs;
+  let inMs = seg.sourceInMs;
+  let outMs = inMs + dur;
+  if (outMs > srcLen) {
+    outMs = srcLen;
+    inMs = Math.max(0, srcLen - dur);
+  }
+  // Always occupy the FULL slot [start,end]. When the source can't fill it
+  // (sourceOut-sourceIn < dur), the renderer/preview hold the last frame for
+  // the remainder — so the swap leaves NO black gap and NO overlap.
+  return { ...seg, timelineStartMs: start, timelineEndMs: end, sourceInMs: inMs, sourceOutMs: outMs };
+}
+
+/** The other segment a dragged clip would swap with: max timeline overlap, or null (→ free move). */
+export function findSwapTarget(
+  segments: PlanSegment[],
+  draggedId: string,
+  newStartMs: number,
+  durMs: number,
+): PlanSegment | null {
+  const aS = newStartMs, aE = newStartMs + durMs;
+  let best: PlanSegment | null = null;
+  let bestOv = 0;
+  for (const s of segments) {
+    if (s.id === draggedId) continue;
+    const ov = Math.max(0, Math.min(aE, s.timelineEndMs) - Math.max(aS, s.timelineStartMs));
+    if (ov > bestOv) { bestOv = ov; best = s; }
+  }
+  return bestOv > 0 ? best : null;
+}
+
 /** Delete a segment. The vacated span becomes black (filled at normalize time). */
 export function applyDelete(plan: EditPlan, segId: string): EditPlan {
   const segments = plan.segments.filter((s) => s.id !== segId);

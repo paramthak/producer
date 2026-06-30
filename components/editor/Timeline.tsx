@@ -12,7 +12,7 @@ import {
   type SectionId,
   type SourceClip,
 } from "@/lib/types";
-import { applyMove, applyTrim, effectiveDurationMs, MIN_SEG_MS } from "@/lib/planEdit";
+import { applyMove, applySwap, applyTrim, effectiveDurationMs, findSwapTarget, MIN_SEG_MS } from "@/lib/planEdit";
 import { cn, formatDuration } from "@/lib/utils";
 
 interface Props {
@@ -117,28 +117,36 @@ export function Timeline({
   }, []);
 
   // ---- Move a segment (drag its body) ----
-  const moveRef = useRef<{ id: string; startX: number; origStart: number; dur: number } | null>(null);
+  // Drop onto another clip → SWAP positions (each keeps its length); drop into
+  // empty space → free move. During the drag the clip rides the cursor as a
+  // ghost (no plan mutation) and the swap target is highlighted; we resolve on
+  // release. The dragged clip's live x lives in `drag` (purely visual).
+  const [drag, setDrag] = useState<{ id: string; leftPx: number; targetId: string | null } | null>(null);
   const onSegPointerDown = (seg: PlanSegment) => (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).dataset.handle) return; // trim handle takes over
     e.preventDefault();
     onSelect(seg.id);
     onSeek(seg.timelineStartMs);
-    moveRef.current = { id: seg.id, startX: e.clientX, origStart: seg.timelineStartMs, dur: seg.timelineEndMs - seg.timelineStartMs };
+    const startX = e.clientX;
+    const origStart = seg.timelineStartMs;
+    const dur = seg.timelineEndMs - seg.timelineStartMs;
+    let curMs = origStart;
+    let curTargetId: string | null = null;
+    setDrag({ id: seg.id, leftPx: origStart * pxPerMs, targetId: null });
     const move = (ev: PointerEvent) => {
-      const m = moveRef.current;
-      if (!m) return;
-      const dx = ev.clientX - m.startX;
-      let ns = Math.max(0, m.origStart + dx / pxPerMs);
-      ns = snap(ns, m.id);
-      setDraftPlan(applyMove(plan, m.id, ns));
+      const dx = ev.clientX - startX;
+      curMs = snap(Math.max(0, origStart + dx / pxPerMs), seg.id);
+      const target = findSwapTarget(ordered, seg.id, curMs, dur);
+      curTargetId = target?.id ?? null;
+      setDrag({ id: seg.id, leftPx: curMs * pxPerMs, targetId: curTargetId });
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      moveRef.current = null;
-      const d = draftRef.current;
-      setDraftPlan(null);
-      if (d) onChange(d);
+      setDrag(null);
+      // Commit flatly (never inside a setState updater).
+      if (curTargetId) onChange(applySwap(plan, seg.id, curTargetId, clips));
+      else if (Math.abs(curMs - origStart) > 1) onChange(applyMove(plan, seg.id, curMs));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -271,6 +279,8 @@ export function Timeline({
                 pxPerMs={pxPerMs}
                 selected={seg.id === selectedId}
                 active={currentTimeMs >= seg.timelineStartMs && currentTimeMs < seg.timelineEndMs}
+                dragLeftPx={drag?.id === seg.id ? drag.leftPx : undefined}
+                isSwapTarget={drag?.targetId === seg.id}
                 onPointerDown={onSegPointerDown(seg)}
                 onTrimDown={onTrimDown}
               />
@@ -333,6 +343,8 @@ function SegmentCard({
   pxPerMs,
   selected,
   active,
+  dragLeftPx,
+  isSwapTarget,
   onPointerDown,
   onTrimDown,
 }: {
@@ -341,10 +353,13 @@ function SegmentCard({
   pxPerMs: number;
   selected: boolean;
   active: boolean;
+  dragLeftPx?: number;
+  isSwapTarget?: boolean;
   onPointerDown: (e: React.PointerEvent) => void;
   onTrimDown: (seg: PlanSegment, side: "L" | "R") => (e: React.PointerEvent) => void;
 }) {
-  const left = seg.timelineStartMs * pxPerMs;
+  const dragging = dragLeftPx !== undefined;
+  const left = dragging ? dragLeftPx : seg.timelineStartMs * pxPerMs;
   const width = Math.max(8, (seg.timelineEndMs - seg.timelineStartMs) * pxPerMs);
   const colorVar = SECTION_DOT_VAR[seg.section];
   const posterUrl = posterUrlFor(clip);
@@ -356,12 +371,15 @@ function SegmentCard({
       onPointerDown={onPointerDown}
       className={cn(
         "group absolute top-1.5 bottom-1.5 cursor-grab overflow-hidden rounded-md border bg-card active:cursor-grabbing",
-        selected ? "ring-2 ring-accent" : active ? "ring-1 ring-primary/50" : "",
+        dragging ? "z-[5] cursor-grabbing opacity-90 shadow-[0_12px_28px_-8px_rgba(0,0,0,0.45)] ring-2 ring-primary" :
+          selected ? "ring-2 ring-accent" : active ? "ring-1 ring-primary/50" : "",
+        isSwapTarget && "ring-2 ring-accent ring-offset-1 ring-offset-card",
       )}
       style={{
         left,
         width,
         borderColor: `hsl(var(${colorVar}) / 0.6)`,
+        transition: dragging ? "none" : "left 120ms ease",
       }}
     >
       {/* section color strip */}

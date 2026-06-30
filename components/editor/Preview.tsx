@@ -112,7 +112,11 @@ export function Preview({
       }
       setImageUrl(null);
       const url = proxyUrlFor(clip);
-      const targetSec = (active.sourceInMs + (ms - active.timelineStartMs)) / 1000;
+      // Clamp to the source window so a clip swapped into a longer slot holds
+      // its last frame for the remainder (matches the render's tpad), instead
+      // of running past its end.
+      const rawSec = (active.sourceInMs + (ms - active.timelineStartMs)) / 1000;
+      const targetSec = Math.min(rawSec, Math.max(0, active.sourceOutMs / 1000 - 0.05));
       const f = vidRefs[frontRef.current].current;
       if (!f) return;
       // (Re)load the front element if it isn't already on this segment.
@@ -129,7 +133,8 @@ export function Preview({
           const aseg = active;
           const seekOnce = () => {
             try {
-              f.currentTime = Math.max(0, (aseg.sourceInMs + (clockRef.current - aseg.timelineStartMs)) / 1000);
+              const raw = (aseg.sourceInMs + (clockRef.current - aseg.timelineStartMs)) / 1000;
+              f.currentTime = Math.max(0, Math.min(raw, aseg.sourceOutMs / 1000 - 0.05));
             } catch { /* ignore */ }
           };
           f.addEventListener("loadeddata", seekOnce, { once: true });

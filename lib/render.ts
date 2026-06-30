@@ -110,6 +110,12 @@ async function encodeSegmentPart(
     await runFfmpeg(["-y", "-loop", "1", "-t", durSec, "-i", src, "-vf", VF, "-an", ...ENC, outPath], signal);
   } else {
     const ss = (seg.sourceInMs / 1000).toFixed(3);
-    await runFfmpeg(["-y", "-ss", ss, "-t", durSec, "-i", src, "-vf", VF, "-an", ...ENC, outPath], signal);
+    const slotSec = (seg.timelineEndMs - seg.timelineStartMs) / 1000;
+    const srcSec = (seg.sourceOutMs - seg.sourceInMs) / 1000;
+    const holdSec = slotSec - srcSec;
+    // If the source can't fill the slot, read what's available and clone the
+    // last frame for the remainder (tpad) so the part is exactly slot-length.
+    const vf = holdSec > 0.04 ? `${VF},tpad=stop_mode=clone:stop_duration=${holdSec.toFixed(3)}` : VF;
+    await runFfmpeg(["-y", "-ss", ss, "-t", srcSec.toFixed(3), "-i", src, "-vf", vf, "-an", ...ENC, outPath], signal);
   }
 }
