@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Bold, Captions, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PRESETS, applyPreset, sortedCaptions, cleanCaptionWord } from "@/lib/subtitles";
@@ -28,6 +28,34 @@ interface Props {
 export function SubtitleScriptBox({ style, captions, onStyleChange, onCaptionsChange }: Props) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const ordered = sortedCaptions(captions);
+
+  // Inline spelling edit of a single word (double-click). Timing + bold stay;
+  // only the word's text changes, and it's still auto-cleaned on display.
+  const [editing, setEditing] = useState<{ capId: string; wi: number } | null>(null);
+  const [draftText, setDraftText] = useState("");
+  const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const commitEdit = useCallback(
+    (capId: string, wi: number, text: string) => {
+      setEditing(null);
+      const trimmed = text.trim();
+      const cur = captions.find((c) => c.id === capId)?.words[wi]?.text ?? "";
+      if (!trimmed || trimmed === cur) return; // no-op / empty guard
+      const next = captions.map((c) =>
+        c.id === capId
+          ? { ...c, words: c.words.map((w, i) => (i === wi ? { ...w, text: trimmed } : w)) }
+          : c,
+      );
+      onCaptionsChange(next);
+    },
+    [captions, onCaptionsChange],
+  );
+
+  const beginEdit = useCallback((capId: string, wi: number, current: string) => {
+    if (clickTimer.current) { clearTimeout(clickTimer.current); clickTimer.current = null; }
+    setDraftText(current);
+    setEditing({ capId, wi });
+  }, []);
 
   const setBoldForIds = useCallback(
     (targets: Map<string, Set<number>>, forceBold?: boolean) => {
@@ -135,8 +163,7 @@ export function SubtitleScriptBox({ style, captions, onStyleChange, onCaptionsCh
         {/* Emphasis controls */}
         <div className="flex items-center justify-between gap-2">
           <p className="text-[11px] leading-tight text-muted-foreground">
-            Select word(s), then{" "}
-            <kbd className="rounded bg-muted px-1 font-mono text-[10px]">⌘B</kbd> — or click a word.
+            Click a word to emphasize · <span className="text-foreground/80">double-click to fix spelling</span>.
           </p>
           <Button
             type="button"
@@ -166,21 +193,42 @@ export function SubtitleScriptBox({ style, captions, onStyleChange, onCaptionsCh
                 // tokens that clean to empty (pure punctuation).
                 const display = cleanCaptionWord(w.text);
                 if (!display) return null;
+                const isEditing = editing?.capId === c.id && editing?.wi === wi;
                 return (
                   <span key={wi}>
-                    <span
-                      data-cap={c.id}
-                      data-word={wi}
-                      onClick={() => toggleWord(c.id, wi)}
-                      className={cn(
-                        "cursor-pointer rounded-sm px-0.5 transition-colors",
-                        w.bold
-                          ? "font-bold text-primary"
-                          : "text-foreground/85 hover:text-foreground",
-                      )}
-                    >
-                      {display}
-                    </span>{" "}
+                    {isEditing ? (
+                      <input
+                        autoFocus
+                        value={draftText}
+                        onChange={(e) => setDraftText(e.target.value)}
+                        onBlur={() => commitEdit(c.id, wi, draftText)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") { e.preventDefault(); commitEdit(c.id, wi, draftText); }
+                          else if (e.key === "Escape") { e.preventDefault(); setEditing(null); }
+                        }}
+                        size={Math.max(2, draftText.length)}
+                        className="rounded-sm border border-primary/60 bg-background px-1 text-sm text-foreground outline-none"
+                      />
+                    ) : (
+                      <span
+                        data-cap={c.id}
+                        data-word={wi}
+                        title="Click to emphasize · double-click to fix spelling"
+                        onClick={() => {
+                          if (clickTimer.current) clearTimeout(clickTimer.current);
+                          clickTimer.current = setTimeout(() => { toggleWord(c.id, wi); clickTimer.current = null; }, 200);
+                        }}
+                        onDoubleClick={() => beginEdit(c.id, wi, display)}
+                        className={cn(
+                          "cursor-pointer rounded-sm px-0.5 transition-colors",
+                          w.bold
+                            ? "font-bold text-primary"
+                            : "text-foreground/85 hover:text-foreground",
+                        )}
+                      >
+                        {display}
+                      </span>
+                    )}{" "}
                   </span>
                 );
               })}

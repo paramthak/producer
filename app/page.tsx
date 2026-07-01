@@ -6,7 +6,9 @@ import {
   Captions,
   Download,
   FileVideo,
+  HardDrive,
   Loader2,
+  LogOut,
   Plus,
   Redo2,
   RotateCw,
@@ -31,6 +33,7 @@ import { Timeline } from "@/components/editor/Timeline";
 import { SubtitleScriptBox } from "@/components/editor/SubtitleScriptBox";
 import { resetSession, uploadClip, useSessionManifest } from "@/lib/builderStore";
 import { applySplit, applyDelete, addFromLibrary } from "@/lib/planEdit";
+import { DriveBrowser } from "@/components/drive/DriveBrowser";
 import {
   PHASE_LABEL,
   SECTIONS,
@@ -462,6 +465,18 @@ export default function StudioPage() {
         <div className="container flex h-16 items-center justify-between gap-4">
           <Logo />
           <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={async () => {
+                await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+                window.location.href = "/login";
+              }}
+              className="gap-1.5"
+              title="Log out of Producer and disconnect Google Drive"
+            >
+              <LogOut className="size-3.5" /> Log out
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -913,6 +928,7 @@ function ClipLibrary({
   onClipsChanged: () => void;
 }) {
   const [uploadingTo, setUploadingTo] = useState<SectionId | null>(null);
+  const [driveSection, setDriveSection] = useState<SectionId | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const pendingSectionRef = useRef<SectionId | null>(null);
 
@@ -961,9 +977,17 @@ function ClipLibrary({
                 <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{SECTION_LABEL[section]}</span>
                 <button
                   type="button"
+                  onClick={() => setDriveSection(section)}
+                  title="Import from Google Drive"
+                  className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary hover:text-foreground"
+                >
+                  <HardDrive className="size-3" /> Drive
+                </button>
+                <button
+                  type="button"
                   onClick={() => pickFor(section)}
                   disabled={uploadingTo === section}
-                  className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary hover:text-foreground"
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary hover:text-foreground"
                 >
                   {uploadingTo === section ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />} Add
                 </button>
@@ -981,6 +1005,15 @@ function ClipLibrary({
           );
         })}
       </CardContent>
+      {sessionId && (
+        <DriveBrowser
+          open={driveSection !== null}
+          onOpenChange={(o) => { if (!o) setDriveSection(null); }}
+          sessionId={sessionId}
+          section={driveSection ?? "hook"}
+          onImported={() => onClipsChanged()}
+        />
+      )}
     </Card>
   );
 }

@@ -1,8 +1,9 @@
 "use client";
 import { useCallback, useId, useRef, useState } from "react";
-import { Plus, X, Film, Image as ImageIcon, AlertCircle, Loader2, CheckCircle2, RotateCw } from "lucide-react";
+import { Plus, X, Film, Image as ImageIcon, AlertCircle, Loader2, CheckCircle2, RotateCw, HardDrive } from "lucide-react";
 import { SectionDot } from "./SectionDot";
 import { Button } from "@/components/ui/button";
+import { DriveBrowser } from "@/components/drive/DriveBrowser";
 import { formatDuration } from "@/lib/utils";
 import {
   IMAGE_EXTS,
@@ -42,6 +43,7 @@ export function SectionBucket({ sessionId, section, clips, onChange }: Props) {
   // In-flight + failed uploads keyed by uploadId. We surface progress + status
   // here so the user always sees what's happening, never a blank screen.
   const [pending, setPending] = useState<Record<string, PendingUpload>>({});
+  const [driveOpen, setDriveOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const setProgress = useCallback((uploadId: string, file: File, p: UploadProgress) => {
@@ -168,21 +170,39 @@ export function SectionBucket({ sessionId, section, clips, onChange }: Props) {
             {isUploading && <span className="ml-1 text-accent">· uploading…</span>}
           </span>
         </div>
-        <label htmlFor={inputId} className="cursor-pointer">
-          <input
-            id={inputId}
-            ref={inputRef}
-            type="file"
-            multiple
-            accept={ACCEPT}
-            className="sr-only"
-            onChange={(e) => e.target.files && handleFiles(e.target.files)}
-          />
-          <span className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md border border-border bg-background/40 px-2 text-xs hover:bg-muted/40 transition-colors">
-            <Plus className="size-3" /> Add
-          </span>
-        </label>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setDriveOpen(true)}
+            title="Import from Google Drive"
+            className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-background/40 px-2 text-xs transition-colors hover:bg-muted/40"
+          >
+            <HardDrive className="size-3" /> Drive
+          </button>
+          <label htmlFor={inputId} className="cursor-pointer">
+            <input
+              id={inputId}
+              ref={inputRef}
+              type="file"
+              multiple
+              accept={ACCEPT}
+              className="sr-only"
+              onChange={(e) => e.target.files && handleFiles(e.target.files)}
+            />
+            <span className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md border border-border bg-background/40 px-2 text-xs hover:bg-muted/40 transition-colors">
+              <Plus className="size-3" /> Add
+            </span>
+          </label>
+        </div>
       </div>
+
+      <DriveBrowser
+        open={driveOpen}
+        onOpenChange={setDriveOpen}
+        sessionId={sessionId}
+        section={section}
+        onImported={() => onChange()}
+      />
 
       <div className="flex flex-1 flex-col gap-2 px-4 pb-4 pt-3 min-h-[8.5rem]">
         {/* In-flight + failed uploads */}

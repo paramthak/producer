@@ -16,7 +16,9 @@ export async function POST() {
     const entries = await fs.readdir(DATA_ROOT, { withFileTypes: true });
     await Promise.all(
       entries
-        .filter((e) => e.isDirectory() && e.name !== sessionId)
+        // Only nuke session-shaped DIRECTORIES. Never touch files (e.g. the
+        // persisted google-drive.json token) or config dirs.
+        .filter((e) => e.isDirectory() && e.name !== sessionId && /^[a-zA-Z0-9_-]{6,}$/.test(e.name))
         .map((e) => fs.rm(path.join(DATA_ROOT, e.name), { recursive: true, force: true })),
     );
   } catch {
