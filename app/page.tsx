@@ -34,6 +34,7 @@ import { SubtitleScriptBox } from "@/components/editor/SubtitleScriptBox";
 import { resetSession, uploadClip, useSessionManifest } from "@/lib/builderStore";
 import { applySplit, applyDelete, addFromLibrary } from "@/lib/planEdit";
 import { DriveBrowser } from "@/components/drive/DriveBrowser";
+import { DrivePanel } from "@/components/drive/DrivePanel";
 import {
   PHASE_LABEL,
   SECTIONS,
@@ -675,6 +676,9 @@ function SetupView({
               </div>
             </CardContent>
           </Card>
+
+          {/* Always-open Google Drive browser — drag clips onto a section above. */}
+          <DrivePanel />
         </section>
 
         <aside className="flex flex-col gap-6">

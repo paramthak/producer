@@ -3,7 +3,7 @@ import { useCallback, useId, useRef, useState } from "react";
 import { Plus, X, Film, Image as ImageIcon, AlertCircle, Loader2, CheckCircle2, RotateCw, HardDrive } from "lucide-react";
 import { SectionDot } from "./SectionDot";
 import { Button } from "@/components/ui/button";
-import { DriveBrowser } from "@/components/drive/DriveBrowser";
+import { DRIVE_DND_TYPE } from "@/components/drive/DrivePanel";
 import { formatDuration } from "@/lib/utils";
 import {
   IMAGE_EXTS,
@@ -43,7 +43,10 @@ export function SectionBucket({ sessionId, section, clips, onChange }: Props) {
   // In-flight + failed uploads keyed by uploadId. We surface progress + status
   // here so the user always sees what's happening, never a blank screen.
   const [pending, setPending] = useState<Record<string, PendingUpload>>({});
-  const [driveOpen, setDriveOpen] = useState(false);
+  // Background Drive imports (dragged from the Drive panel). Indeterminate —
+  // the server downloads the file, so there's no byte-progress; we show a
+  // spinner chip per file and it resolves to a clip on completion.
+  const [imports, setImports] = useState<Record<string, { key: string; name: string; status: "importing" | "failed"; error?: string; fileId: string }>>({});
   const inputRef = useRef<HTMLInputElement>(null);
 
   const setProgress = useCallback((uploadId: string, file: File, p: UploadProgress) => {
@@ -142,7 +145,35 @@ export function SectionBucket({ sessionId, section, clips, onChange }: Props) {
     [removePending, uploadOne],
   );
 
+  const importDriveFile = useCallback(
+    async (fileId: string, name: string) => {
+      const key = `imp_${fileId}_${Math.random().toString(36).slice(2, 6)}`;
+      setImports((p) => ({ ...p, [key]: { key, name, status: "importing", fileId } }));
+      try {
+        const r = await fetch("/api/drive/import", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId, section, fileId }),
+        });
+        const j = (await r.json().catch(() => ({}))) as { clip?: SourceClip; error?: string };
+        if (!r.ok || !j.clip) throw new Error(j.error || "Import failed");
+        setImports((p) => { const n = { ...p }; delete n[key]; return n; });
+        onChange();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Import failed";
+        setImports((p) => ({ ...p, [key]: { ...p[key], status: "failed", error: msg } }));
+        toast.error(`${name}: ${msg}`);
+      }
+    },
+    [sessionId, section, onChange],
+  );
+
+  const dismissImport = useCallback((key: string) => {
+    setImports((p) => { const n = { ...p }; delete n[key]; return n; });
+  }, []);
+
   const pendingList = Object.values(pending);
+  const importList = Object.values(imports);
   const isUploading = pendingList.some((p) => p.progress.status === "uploading");
 
   return (
@@ -158,6 +189,15 @@ export function SectionBucket({ sessionId, section, clips, onChange }: Props) {
       onDrop={(e) => {
         e.preventDefault();
         setDragging(false);
+        // Files dragged from the Google Drive panel.
+        const drive = e.dataTransfer.getData(DRIVE_DND_TYPE);
+        if (drive) {
+          try {
+            const arr = JSON.parse(drive) as { id: string; name: string }[];
+            for (const f of arr) void importDriveFile(f.id, f.name);
+          } catch { /* ignore malformed payload */ }
+          return;
+        }
         if (e.dataTransfer.files?.length) void handleFiles(e.dataTransfer.files);
       }}
     >
@@ -170,41 +210,60 @@ export function SectionBucket({ sessionId, section, clips, onChange }: Props) {
             {isUploading && <span className="ml-1 text-accent">· uploading…</span>}
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setDriveOpen(true)}
-            title="Import from Google Drive"
-            className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-background/40 px-2 text-xs transition-colors hover:bg-muted/40"
-          >
-            <HardDrive className="size-3" /> Drive
-          </button>
-          <label htmlFor={inputId} className="cursor-pointer">
-            <input
-              id={inputId}
-              ref={inputRef}
-              type="file"
-              multiple
-              accept={ACCEPT}
-              className="sr-only"
-              onChange={(e) => e.target.files && handleFiles(e.target.files)}
-            />
-            <span className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md border border-border bg-background/40 px-2 text-xs hover:bg-muted/40 transition-colors">
-              <Plus className="size-3" /> Add
-            </span>
-          </label>
-        </div>
+        <label htmlFor={inputId} className="cursor-pointer">
+          <input
+            id={inputId}
+            ref={inputRef}
+            type="file"
+            multiple
+            accept={ACCEPT}
+            className="sr-only"
+            onChange={(e) => e.target.files && handleFiles(e.target.files)}
+          />
+          <span className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md border border-border bg-background/40 px-2 text-xs hover:bg-muted/40 transition-colors">
+            <Plus className="size-3" /> Add
+          </span>
+        </label>
       </div>
 
-      <DriveBrowser
-        open={driveOpen}
-        onOpenChange={setDriveOpen}
-        sessionId={sessionId}
-        section={section}
-        onImported={() => onChange()}
-      />
-
       <div className="flex flex-1 flex-col gap-2 px-4 pb-4 pt-3 min-h-[8.5rem]">
+        {/* Background Drive imports (indeterminate) */}
+        {importList.length > 0 && (
+          <ul className="flex flex-col gap-2" role="list">
+            {importList.map((imp) => (
+              <li
+                key={imp.key}
+                className={`flex items-center gap-2.5 rounded-lg border px-2.5 py-2 ${
+                  imp.status === "failed" ? "border-destructive/40 bg-destructive/5" : "border-primary/40 bg-primary/5"
+                }`}
+              >
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted/50">
+                  {imp.status === "failed" ? <AlertCircle className="size-4 text-destructive" /> : <HardDrive className="size-4 text-primary" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium">{imp.name}</div>
+                  <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                    {imp.status === "failed" ? (
+                      <span className="text-destructive">{imp.error}</span>
+                    ) : (
+                      <><Loader2 className="size-3 animate-spin" /> Importing from Drive…</>
+                    )}
+                  </div>
+                </div>
+                {imp.status === "failed" && (
+                  <Button variant="ghost" size="icon" className="size-7" aria-label="Retry import"
+                    onClick={() => { dismissImport(imp.key); void importDriveFile(imp.fileId, imp.name); }}>
+                    <RotateCw className="size-3.5" />
+                  </Button>
+                )}
+                <Button variant="ghost" size="icon" className="size-7" aria-label="Dismiss" onClick={() => dismissImport(imp.key)}>
+                  <X className="size-3.5" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+
         {/* In-flight + failed uploads */}
         {pendingList.length > 0 && (
           <ul className="flex flex-col gap-2" role="list">
@@ -277,7 +336,7 @@ export function SectionBucket({ sessionId, section, clips, onChange }: Props) {
         )}
 
         {/* Completed clips */}
-        {clips.length === 0 && pendingList.length === 0 ? (
+        {clips.length === 0 && pendingList.length === 0 && importList.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center rounded-lg border border-dashed border-border/70 px-3 py-6 text-center">
             <p className="text-xs text-muted-foreground">Drop clips or images here</p>
             <p className="mt-1 text-[10px] uppercase tracking-wider text-muted-foreground/70">
